@@ -1,0 +1,10 @@
+# Start small (20-50 tickers). Expand later.
+AAPL
+MSFT
+NVDA
+TSLA
+PLTR
+SOFI
+RKLB
+IONQ
+SOUN
