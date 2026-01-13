@@ -1,0 +1,28 @@
+services:
+  eod_fetch:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./tickers.txt:/app/tickers.txt:ro
+    command: ["python", "-m", "src.jobs.eod_fetch"]
+
+  report:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./tickers.txt:/app/tickers.txt:ro
+    command: ["python", "-m", "src.jobs.report"]
+
+  email:
+    build: .
+    env_file: .env
+    volumes:
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+    command: ["python", "-m", "src.jobs.send_email"]
