@@ -9,3 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ /app/src/
 COPY tickers.txt /app/tickers.txt
 RUN mkdir -p /app/data /app/outputs /app/logs
+COPY configs/ /app/configs/

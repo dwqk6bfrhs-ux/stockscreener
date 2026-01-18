@@ -1,0 +1,57 @@
+name: retest_shrink_v1
+
+benchmarks:
+  primary: SPY
+  secondary: IWM
+
+universe:
+  exclude_tickers: ["SPY", "IWM"]
+  min_close: 5.0
+  min_adv20_dollars: 20000000
+  min_history_days: 80
+
+lookbacks:
+  atr: 20
+  pct: 60
+  adv: 20
+
+pressure_test:
+  vol_pct_min: 0.85
+  down_atr_min: 0.75
+  range_atr_min: 1.20   # soft filter; used as a bonus score, not a hard gate
+
+no_follow_through:
+  window_days: 3
+  undercut_atr_max: 0.10
+  vol_max_mult: 0.80
+
+retest:
+  window_days: 12
+  zone_atr: 0.50
+  shrink_max: 0.60
+  undercut_atr_max: 0.10
+
+confirm:
+  window_days: 3
+  close_strength: true
+  vol_max_mult: 0.80
+
+risk:
+  stop_atr: 0.25
+
+execution:
+  entry: next_open     # options: next_open | close
+  exit: close          # options: next_open | close
+
+exits:
+  min_hold_days: 3
+  max_hold_days: 10
+  no_progress_days: 5
+  no_progress_min_r: 0.5
+  take_profit_r: null  # set to 2.0 later if desired
+  trail: null          # e.g. "3day_low" later
+
+output:
+  watch_size: 30
+  action_size: 5
+  candidates_size: 20
