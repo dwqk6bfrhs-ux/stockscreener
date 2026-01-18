@@ -17,6 +17,9 @@ services:
       - ./outputs:/app/outputs
       - ./logs:/app/logs
       - ./tickers.txt:/app/tickers.txt:ro
+      - ./configs:/app/configs:ro
+    environment:
+      - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
     command: ["python", "-m", "src.jobs.report"]
 
   email:
