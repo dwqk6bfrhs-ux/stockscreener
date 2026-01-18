@@ -29,3 +29,50 @@ services:
       - ./outputs:/app/outputs
       - ./logs:/app/logs
     command: ["python", "-m", "src.jobs.send_email"]
+
+  backtest:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      - ./tickers.txt:/app/tickers.txt:ro
+    environment:
+      - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
+    entrypoint: ["python", "-m", "src.jobs.backtest"]
+
+  fred_fetch:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      # Optional: OpenBB creds mount (add when you configure it)
+      # - ./.openbb_platform:/root/.openbb_platform:ro
+    command: ["python", "-m", "src.jobs.fred_fetch"]
+
+  finra_fetch:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      # Optional: OpenBB creds mount (add when you configure it)
+      # - ./.openbb_platform:/root/.openbb_platform:ro
+    command: ["python", "-m", "src.jobs.finra_fetch"]
+
+  generate_signals:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      - ./tickers.txt:/app/tickers.txt:ro
+    environment:
+      - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
+    entrypoint: ["python", "-m", "src.jobs.generate_signals"]
