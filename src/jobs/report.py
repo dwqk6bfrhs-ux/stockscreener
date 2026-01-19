@@ -1,113 +1,122 @@
 import os
 import json
+import sqlite3
 import pandas as pd
-import yaml
 
 from src.common.db import init_db, connect
 from src.common.logging import setup_logger
-from src.common.timeutil import today_et
-
-from src.strategy.features import add_basic_features
-from src.strategy.retest_shrink import Params, evaluate_ticker
+from src.common.timeutil import last_completed_trading_day_et
 
 log = setup_logger("report")
 
-def read_prices() -> pd.DataFrame:
-  with connect() as conn:
-    return pd.read_sql_query(
-      "SELECT ticker, date, open, high, low, close, volume FROM prices_daily",
-      conn
-    )
 
-def load_config() -> dict:
-  path = os.environ.get("STRATEGY_CONFIG", "/app/configs/retest_shrink.yaml")
-  with open(path, "r", encoding="utf-8") as f:
-    return yaml.safe_load(f)
+def _out_dir_for_date(date: str) -> str:
+  out_dir = os.environ.get("OUTPUT_DIR", "/app/outputs")
+  day_dir = os.path.join(out_dir, date)
+  os.makedirs(day_dir, exist_ok=True)
+  return day_dir
+
+
+def read_signals(date: str) -> pd.DataFrame:
+  with connect() as conn:
+    df = pd.read_sql_query(
+      """
+      SELECT date, ticker, strategy, state, score, stop, meta_json, created_at
+      FROM signals_daily
+      WHERE date = ?
+      """,
+      conn,
+      params=(date,),
+    )
+  return df
+
+
+def read_last_close(date: str, tickers: list[str]) -> pd.DataFrame:
+  """
+  Pull close/volume/range_pct for the specific date, for ranking and display.
+  """
+  if not tickers:
+    return pd.DataFrame(columns=["ticker","close","volume","range_pct"])
+  ph = ",".join(["?"] * len(tickers))
+  with connect() as conn:
+    df = pd.read_sql_query(
+      f"""
+      SELECT ticker, close, volume, high, low
+      FROM prices_daily
+      WHERE date = ? AND ticker IN ({ph})
+      """,
+      conn,
+      params=[date] + tickers,
+    )
+  if df.empty:
+    return df
+  df["range_pct"] = (df["high"] - df["low"]) / df["close"].replace(0, pd.NA)
+  return df[["ticker","close","volume","range_pct"]]
+
 
 def main():
   init_db()
-  out_dir = os.environ.get("OUTPUT_DIR", "/app/outputs")
-  date = today_et()
-  day_dir = os.path.join(out_dir, date)
-  os.makedirs(day_dir, exist_ok=True)
 
-  cfg = load_config()
+  date = os.environ.get("REPORT_DATE") or last_completed_trading_day_et()
+  day_dir = _out_dir_for_date(date)
 
-  df = read_prices()
+  df = read_signals(date)
   if df.empty:
-    raise RuntimeError("No prices in DB. Run eod_fetch first.")
+    raise RuntimeError(f"No signals found for {date}. Run generate_signals first.")
 
-  df["date"] = pd.to_datetime(df["date"])
-  df = add_basic_features(
-    df,
-    atr_n=int(cfg["lookbacks"]["atr"]),
-    pct_window=int(cfg["lookbacks"]["pct"]),
-    adv_n=int(cfg["lookbacks"]["adv"]),
-  )
+  # Normalize types
+  df["score"] = pd.to_numeric(df["score"], errors="coerce")
 
-  p = Params(
-    min_close=float(cfg["universe"]["min_close"]),
-    min_adv20_dollars=float(cfg["universe"]["min_adv20_dollars"]),
-    min_history_days=int(cfg["universe"]["min_history_days"]),
-    exclude_tickers=set(cfg["universe"].get("exclude_tickers", [])),
+  # Prepare strategy outputs
+  strategies = sorted(df["strategy"].unique().tolist())
+  summary_lines = []
+  summary_lines.append(f"Report date: {date}")
+  summary_lines.append(f"Strategies: {', '.join(strategies)}")
+  summary_lines.append("")
 
-    vol_pct_min=float(cfg["pressure_test"]["vol_pct_min"]),
-    down_atr_min=float(cfg["pressure_test"]["down_atr_min"]),
-    range_atr_min=float(cfg["pressure_test"]["range_atr_min"]),
+  for strat in strategies:
+    d = df[df["strategy"] == strat].copy()
 
-    nft_window_days=int(cfg["no_follow_through"]["window_days"]),
-    nft_undercut_atr_max=float(cfg["no_follow_through"]["undercut_atr_max"]),
-    nft_vol_max_mult=float(cfg["no_follow_through"]["vol_max_mult"]),
+    # Pull pricing info for tickers present in this strategy
+    tickers = d["ticker"].dropna().astype(str).unique().tolist()
+    px = read_last_close(date, tickers)
 
-    retest_window_days=int(cfg["retest"]["window_days"]),
-    retest_zone_atr=float(cfg["retest"]["zone_atr"]),
-    retest_shrink_max=float(cfg["retest"]["shrink_max"]),
-    retest_undercut_atr_max=float(cfg["retest"]["undercut_atr_max"]),
+    if not px.empty:
+      d = d.merge(px, on="ticker", how="left")
 
-    confirm_window_days=int(cfg["confirm"]["window_days"]),
-    confirm_close_strength=bool(cfg["confirm"]["close_strength"]),
-    confirm_vol_max_mult=float(cfg["confirm"]["vol_max_mult"]),
+    # Sort by score desc (nulls last)
+    d = d.sort_values(["state", "score"], ascending=[True, False])
 
-    stop_atr=float(cfg["risk"]["stop_atr"]),
-  )
+    # Write full CSV per strategy
+    out_csv = os.path.join(day_dir, f"signals_{strat}.csv")
+    d.to_csv(out_csv, index=False)
 
-  results = []
-  for ticker, g in df.groupby("ticker"):
-    r = evaluate_ticker(g, p)
-    if r is not None:
-      results.append(r)
+    # Summarize states
+    counts = d["state"].value_counts(dropna=False).to_dict()
+    summary_lines.append(f"[{strat}] states: " + ", ".join([f"{k}={v}" for k,v in sorted(counts.items())]))
 
-  res = pd.DataFrame(results)
-  if res.empty:
-    raise RuntimeError("No eligible tickers after filters. Check universe thresholds.")
+    # Optional: show top entries/exits/watch
+    def top_state(state: str, n: int = 10) -> pd.DataFrame:
+      x = d[d["state"] == state].copy()
+      if x.empty:
+        return x
+      return x.sort_values("score", ascending=False).head(n)
 
-  watch = res[res["watch"] == True].sort_values("score", ascending=False).head(int(cfg["output"]["watch_size"]))
-  action = res[res["action"] == True].sort_values("score", ascending=False).head(int(cfg["output"]["action_size"]))
-  cand = res.sort_values("score", ascending=False).head(int(cfg["output"]["candidates_size"]))
+    for state in ["ENTRY", "EXIT", "WATCH"]:
+      top = top_state(state, n=10)
+      if top.empty:
+        continue
+      summary_lines.append(f"  Top {state} (up to 10): " + ", ".join(top["ticker"].astype(str).tolist()))
 
-  watch_cols = [c for c in ["ticker","state","score","d0_date","retest_date","confirm_date","shrink_ratio","l0","stop"] if c in watch.columns]
-  action_cols = [c for c in ["ticker","state","score","d0_date","retest_date","confirm_date","shrink_ratio","l0","stop"] if c in action.columns]
+    summary_lines.append("")
 
-  watch.to_csv(os.path.join(day_dir, "watch_list.csv"), index=False, columns=watch_cols)
-  action.to_csv(os.path.join(day_dir, "action_list.csv"), index=False, columns=action_cols)
+  # Write summary.txt
+  summary_path = os.path.join(day_dir, "summary.txt")
+  with open(summary_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(summary_lines) + "\n")
 
-  with open(os.path.join(day_dir, "candidates_top20.json"), "w", encoding="utf-8") as f:
-    json.dump(cand.to_dict(orient="records"), f, indent=2)
+  log.info(f"Wrote reports to {day_dir} (files={len(strategies) + 1})")
 
-  # Run summary for debugging
-  summary = {
-    "date": date,
-    "strategy": cfg.get("name"),
-    "counts_by_state": res["state"].value_counts().to_dict(),
-    "action_count": int(len(action)),
-    "watch_count": int(len(watch)),
-  }
-  with open(os.path.join(day_dir, "run_summary.json"), "w", encoding="utf-8") as f:
-    json.dump(summary, f, indent=2)
-
-  log.info(f"Generated reports in {day_dir} (action={len(action)}, watch={len(watch)})")
 
 if __name__ == "__main__":
   main()
-
-

@@ -7,7 +7,7 @@ services:
       - ./outputs:/app/outputs
       - ./logs:/app/logs
       - ./tickers.txt:/app/tickers.txt:ro
-    command: ["python", "-m", "src.jobs.eod_fetch"]
+    entrypoint: ["python", "-m", "src.jobs.eod_fetch"]
 
   report:
     build: .
@@ -65,6 +65,14 @@ services:
       # - ./.openbb_platform:/root/.openbb_platform:ro
     command: ["python", "-m", "src.jobs.finra_fetch"]
 
+  universe_fetch:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    entrypoint: ["python", "-m", "src.jobs.universe_fetch"]
+
   generate_signals:
     build: .
     env_file: .env
@@ -72,7 +80,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
+      - ./src:/app/src:ro
     environment:
-      - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
+      - STRATEGIES_CONFIG=/app/configs/strategies.yaml
     entrypoint: ["python", "-m", "src.jobs.generate_signals"]

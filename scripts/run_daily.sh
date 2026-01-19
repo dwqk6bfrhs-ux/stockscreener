@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Always run from repo root
@@ -20,8 +21,30 @@ run_step () {
   echo "[$(date -Is)] <<< $name done" | tee -a "$LOG_FILE"
 }
 
-run_step "EOD fetch"  docker compose run --rm eod_fetch
-run_step "Report"     docker compose run --rm report
-run_step "Email"      docker compose run --rm email
+# Determine ET trade date (last completed trading day) inside container env
+TRADE_DATE="$(docker compose run --rm report python - <<'PY'
+from src.common.timeutil import last_completed_trading_day_et
+print(last_completed_trading_day_et())
+PY
+)"
+
+echo "[$(date -Is)] Trade date (ET) = $TRADE_DATE" | tee -a "$LOG_FILE"
+
+# Tunables
+UNIVERSE_LIMIT="${UNIVERSE_LIMIT:-200}"
+FEED="${FEED:-sip}"
+
+run_step "Universe fetch" docker compose run --rm universe_fetch --limit "$UNIVERSE_LIMIT"
+
+run_step "EOD fetch (daily)" docker compose run --rm eod_fetch \
+  --use-universe --limit "$UNIVERSE_LIMIT" \
+  --mode daily --feed "$FEED"
+
+run_step "Generate signals" docker compose run --rm generate_signals \
+  --date "$TRADE_DATE" --limit "$UNIVERSE_LIMIT"
+
+run_step "Report" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" report
+
+run_step "Email" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" email
 
 echo "[$(date -Is)] Daily run completed successfully." | tee -a "$LOG_FILE"
