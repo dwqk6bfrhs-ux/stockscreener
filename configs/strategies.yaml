@@ -1,0 +1,15 @@
+universe_source: alpaca
+lookback_days: 240
+
+strategies:
+  - name: retest_shrink_v1
+    module: src.strategy.retest_shrink
+    params: {}
+
+  - name: ma_cross_5_10
+    module: src.strategy.ma_cross
+    params:
+      fast_window: 5
+      slow_window: 10
+      min_history: 60
+      min_cross_pct: 0.002

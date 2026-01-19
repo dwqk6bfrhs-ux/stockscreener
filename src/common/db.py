@@ -2,7 +2,6 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
-
 RAW_SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices_daily (
   ticker TEXT NOT NULL,
@@ -31,6 +30,21 @@ CREATE TABLE IF NOT EXISTS signals_daily (
 
 CREATE INDEX IF NOT EXISTS idx_signals_date_strategy
   ON signals_daily(date, strategy);
+
+CREATE TABLE IF NOT EXISTS universe_daily (
+  date TEXT NOT NULL,
+  ticker TEXT NOT NULL,
+  source TEXT NOT NULL,
+  meta_json TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (date, ticker, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_universe_date_source
+  ON universe_daily(date, source);
+
+CREATE INDEX IF NOT EXISTS idx_universe_date
+  ON universe_daily(date);
 """
 
 DB_SCHEMA = RAW_SCHEMA + "\n" + DERIVED_SCHEMA

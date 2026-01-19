@@ -14,21 +14,38 @@ def attach_csv(msg: EmailMessage, path: Path):
 
 
 def main():
-  date = today_et()
+  date = os.environ.get("REPORT_DATE") or os.environ.get("EMAIL_DATE") or today_et()
   out_dir = Path(os.environ.get("OUTPUT_DIR", "/app/outputs")) / date
-  action = out_dir / "action_list.csv"
-  watch = out_dir / "watch_list.csv"
-  if not action.exists() or not watch.exists():
-    raise RuntimeError(f"Missing report files in {out_dir}")
+  summary = out_dir / "summary.txt"
+  signal_csvs = sorted(out_dir.glob("signals_*.csv"))
+
+  # Require at least one signals CSV (summary is optional but recommended)
+  if not signal_csvs:
+    raise RuntimeError(f"Missing signals_*.csv in {out_dir}")
 
   msg = EmailMessage()
-  msg["Subject"] = f"[Action List] {date}"
+  msg["Subject"] = f"[Signals] {date}"
   msg["From"] = os.environ["EMAIL_FROM"]
   msg["To"] = os.environ["EMAIL_TO"]
-  msg.set_content(f"Daily report {date}. Attached action_list.csv and watch_list.csv.")
 
-  attach_csv(msg, action)
-  attach_csv(msg, watch)
+  # Email body: prefer summary.txt, otherwise a simple fallback
+  if summary.exists():
+    msg.set_content(summary.read_text(encoding="utf-8"))
+  else:
+    msg.set_content(f"Signals report {date}. Attached signals CSVs.")
+
+  # Attach summary (as text) if present
+  if summary.exists():
+    msg.add_attachment(
+      summary.read_bytes(),
+      maintype="text",
+      subtype="plain",
+      filename="summary.txt",
+    )
+
+  # Attach all signals CSVs
+  for p in signal_csvs:
+    attach_csv(msg, p)
 
   host = os.environ["SMTP_HOST"]
   port = int(os.environ.get("SMTP_PORT", "587"))
