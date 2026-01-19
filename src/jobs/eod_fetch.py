@@ -50,12 +50,20 @@ def _read_tickers_from_universe(universe_date: Optional[str], source: str = "alp
       q = "SELECT ticker FROM universe_daily WHERE date=? AND source=? ORDER BY ticker"
       rows = conn.execute(q, (universe_date, source)).fetchall()
     else:
-      q = "SELECT ticker FROM universe_daily WHERE date=(SELECT MAX(date) FROM universe_daily) AND source=? ORDER BY ticker"
-      rows = conn.execute(q, (source,)).fetchall()
+      q = """
+      SELECT ticker
+      FROM universe_daily
+      WHERE date=(SELECT MAX(date) FROM universe_daily WHERE source=?)
+        AND source=?
+      ORDER BY ticker
+      """
+      rows = conn.execute(q, (source, source)).fetchall()
+
   tickers = [r[0] for r in rows]
   if limit:
     tickers = tickers[:limit]
   return tickers
+
 
 
 def _latest_price_date_in_db() -> Optional[str]:
