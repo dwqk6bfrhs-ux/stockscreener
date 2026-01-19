@@ -1,30 +1,41 @@
+x-vol-core: &vol_core
+  - ./data:/app/data
+  - ./logs:/app/logs
+
+x-vol-with-tickers: &vol_with_tickers
+  - ./data:/app/data
+  - ./logs:/app/logs
+  - ./configs:/app/configs:ro
+  - ./tickers.txt:/app/tickers.txt:ro
+
+x-vol-report: &vol_report
+  - ./data:/app/data
+  - ./outputs:/app/outputs
+  - ./logs:/app/logs
+  - ./configs:/app/configs:ro
+  - ./tickers.txt:/app/tickers.txt:ro
+
+x-vol-email: &vol_email
+  - ./outputs:/app/outputs
+  - ./logs:/app/logs
+
 services:
   universe_fetch:
     build: .
     env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+    volumes: *vol_core
     entrypoint: ["python", "-m", "src.jobs.universe_fetch"]
 
   eod_fetch:
     build: .
     env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
+    volumes: *vol_with_tickers
     entrypoint: ["python", "-m", "src.jobs.eod_fetch"]
 
   hourly_fetch:
     build: .
     env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
+    volumes: *vol_with_tickers
     entrypoint: ["python", "-m", "src.jobs.hourly_fetch"]
 
   generate_signals:
@@ -34,42 +45,24 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
     entrypoint: ["python", "-m", "src.jobs.generate_signals"]
 
   report:
     build: .
     env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./outputs:/app/outputs
-      - ./logs:/app/logs
-      - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
-    # Keep this if your report code expects it; harmless otherwise
-    environment:
-      - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
+    volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.report"]
 
   email:
     build: .
     env_file: .env
-    volumes:
-      - ./outputs:/app/outputs
-      - ./logs:/app/logs
+    volumes: *vol_email
     entrypoint: ["python", "-m", "src.jobs.send_email"]
 
   backtest:
     build: .
     env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./outputs:/app/outputs
-      - ./logs:/app/logs
-      - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
-    environment:
-      - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
+    volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.backtest"]
 
   fred_fetch:
@@ -79,8 +72,6 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
-      # Optional: OpenBB creds mount (only if you configure it)
-      # - ./.openbb_platform:/root/.openbb_platform:ro
     entrypoint: ["python", "-m", "src.jobs.fred_fetch"]
 
   finra_fetch:
@@ -90,6 +81,4 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
-      # Optional: OpenBB creds mount (only if you configure it)
-      # - ./.openbb_platform:/root/.openbb_platform:ro
     entrypoint: ["python", "-m", "src.jobs.finra_fetch"]

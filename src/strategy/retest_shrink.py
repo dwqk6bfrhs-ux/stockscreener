@@ -7,11 +7,11 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 EPS = 1e-12
-
 STRATEGY_NAME = "retest_shrink"
 
+
 # -----------------------------
-# Parameters
+# Parameters (D0/retest/confirm logic unchanged)
 # -----------------------------
 @dataclass
 class Params:
@@ -19,54 +19,55 @@ class Params:
   atr_window: int = 14
 
   # D0 detection
-  d0_lookback_days: int = 80            # scan this many most-recent bars to find the most recent D0
-  d0_vol_lookback: int = 20             # baseline vol window
-  d0_vol_mult: float = 2.0              # D0 if volume >= baseline * mult
-  d0_range_pct_min: float = 0.04        # D0 if (high-low)/close >= this
-  d0_require_red: bool = False          # optional: require close < open
+  d0_lookback_days: int = 80
+  d0_vol_lookback: int = 20
+  d0_vol_mult: float = 2.0
+  d0_range_pct_min: float = 0.04
+  d0_require_red: bool = False
 
   # Retest search window after D0
   retest_window_days: int = 15
-  retest_zone_atr: float = 1.0          # low_j <= l0 + zone_atr * atr0
-  retest_shrink_max: float = 0.35       # vol_j <= shrink_max * v0
-  retest_undercut_atr_max: float = 0.50 # low_j >= l0 - undercut_atr_max * atr0
+  retest_zone_atr: float = 1.0
+  retest_shrink_max: float = 0.35
+  retest_undercut_atr_max: float = 0.50
 
   # Confirm after retest
   confirm_window_days: int = 3
-  confirm_vol_max_mult: float = 0.80    # allow confirm if vol <= mult * v0
-  confirm_close_strength: bool = True   # allow confirm if close > prev close
+  confirm_vol_max_mult: float = 0.80
+  confirm_close_strength: bool = True
 
   # Stop
   stop_atr: float = 1.0
 
-  # Optional "pressure test" heuristic:
-  # If latest bar shows heavy selling near l0 but no breakdown, label PRESSURE_TEST.
+  # Optional "pressure test" heuristic
   pressure_zone_atr: float = 1.0
-  pressure_vol_min_mult: float = 0.90   # volume >= 0.9*v0
+  pressure_vol_min_mult: float = 0.90
   pressure_require_no_new_low: bool = True
 
 
-# A dict version for YAML convenience (optional)
 DEFAULT_PARAMS: Dict[str, Any] = Params().__dict__.copy()
 
 
 # -----------------------------
-# Helpers: ATR + feature prep
+# Helpers: ATR + prep
 # -----------------------------
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+  if x < lo:
+    return lo
+  if x > hi:
+    return hi
+  return x
+
+
 def _ensure_datetime(df: pd.DataFrame) -> pd.DataFrame:
   if "date" not in df.columns:
     raise ValueError("Input df must have a 'date' column.")
   out = df.copy()
-  # tolerate str dates
   out["date"] = pd.to_datetime(out["date"])
   return out
 
 
 def _compute_atr(df: pd.DataFrame, window: int) -> pd.Series:
-  """
-  ATR (simple moving average of True Range).
-  Requires columns: high, low, close
-  """
   high = df["high"].astype(float)
   low = df["low"].astype(float)
   close = df["close"].astype(float)
@@ -77,16 +78,10 @@ def _compute_atr(df: pd.DataFrame, window: int) -> pd.Series:
   tr3 = (low - prev_close).abs()
   tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-  atr = tr.rolling(window=window, min_periods=window).mean()
-  return atr
+  return tr.rolling(window=window, min_periods=window).mean()
 
 
 def _prep(df: pd.DataFrame, p: Params) -> pd.DataFrame:
-  """
-  Returns df sorted by date ascending with extra columns:
-  - range: (high-low)/close
-  - atr: ATR(window)
-  """
   gg = _ensure_datetime(df)
   gg = gg.sort_values("date").reset_index(drop=True)
 
@@ -102,21 +97,13 @@ def _prep(df: pd.DataFrame, p: Params) -> pd.DataFrame:
 
   gg["range"] = (gg["high"] - gg["low"]) / (gg["close"].abs() + EPS)
   gg["atr"] = _compute_atr(gg, window=p.atr_window)
-
   return gg
 
 
 # -----------------------------
-# Core engine
+# Core engine (logic unchanged; emits features for report ranking)
 # -----------------------------
 def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = None) -> Dict[str, Any]:
-  """
-  Returns a rich dict. Your generate_signals pipeline will store:
-  - state in signals_daily.state (via adapter)
-  - score in signals_daily.score
-  - stop in signals_daily.stop
-  - the entire dict into meta_json (via adapter)
-  """
   p = params
   gg = _prep(df, p)
   last = gg.iloc[-1]
@@ -132,13 +119,16 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
       "watch": False,
       "action": False,
       "stop": None,
+      "features": {
+        "n_bars": int(len(gg)),
+      },
     }
 
-  # Baseline volume (rolling median is more robust than mean)
+  # Baseline volume (rolling median)
   gg["vol_base"] = gg["volume"].rolling(window=p.d0_vol_lookback, min_periods=p.d0_vol_lookback).median()
 
   # D0 candidate definition
-  red_ok = (gg["close"] < gg["open"]) if p.d0_require_red else pd.Series([True] * len(gg))
+  red_ok = (gg["close"] < gg["open"]) if p.d0_require_red else pd.Series(True, index=gg.index)
   vol_ok = gg["volume"] >= (gg["vol_base"].fillna(0) * p.d0_vol_mult)
   range_ok = gg["range"] >= p.d0_range_pct_min
   d0_mask = red_ok & vol_ok & range_ok & gg["atr"].notna()
@@ -147,6 +137,16 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
   start_i = max(0, len(gg) - p.d0_lookback_days)
   d0_idx_candidates = gg.index[start_i:][d0_mask.iloc[start_i:]].tolist()
 
+  def pack_features(extra: Dict[str, Any]) -> Dict[str, Any]:
+    base = {
+      "n_bars": int(len(gg)),
+      "last_close": float(last["close"]),
+      "last_volume": float(last["volume"]),
+      "atr_last": float(last["atr"]) if pd.notna(last["atr"]) else None,
+    }
+    base.update(extra)
+    return base
+
   if not d0_idx_candidates:
     # No D0 -> no setup
     score = float(last["volume"]) * float(last["range"])
@@ -154,10 +154,11 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
       "ticker": ticker,
       "date": str(last["date"].date()),
       "state": "NO_D0",
-      "score": score,
+      "score": float(score),
       "watch": False,
       "action": False,
       "stop": None,
+      "features": pack_features({}),
     }
 
   d0_i = d0_idx_candidates[-1]
@@ -167,7 +168,6 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
   v0 = float(d0_row["volume"])
   atr0 = float(d0_row["atr"])
 
-  # If ATR is bad, abort gracefully
   if not (atr0 > 0):
     return {
       "ticker": ticker,
@@ -181,10 +181,10 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
       "l0": l0,
       "v0": v0,
       "atr0": atr0,
+      "features": pack_features({"d0_i": int(d0_i)}),
     }
 
-  # Optional: detect a "pressure test" on the latest bar (large sell pressure but no breakdown)
-  # This matches the spirit of your theory: large selling occurs but price does not continue down.
+  # Optional: pressure test on the latest bar
   l0_floor = l0 - p.retest_undercut_atr_max * atr0
   pressure_in_zone = float(last["low"]) <= (l0 + p.pressure_zone_atr * atr0)
   pressure_vol_ok = float(last["volume"]) >= (p.pressure_vol_min_mult * v0)
@@ -200,10 +200,11 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
       "l0": l0,
       "v0": v0,
       "atr0": atr0,
-      "score": score,
+      "score": float(score),
       "watch": True,
       "action": False,
       "stop": l0 - p.stop_atr * atr0,
+      "features": pack_features({"d0_i": int(d0_i)}),
     }
 
   # Retest search
@@ -235,10 +236,11 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
       "l0": l0,
       "v0": v0,
       "atr0": atr0,
-      "score": score,
+      "score": float(score),
       "watch": True,
       "action": False,
       "stop": l0 - p.stop_atr * atr0,
+      "features": pack_features({"d0_i": int(d0_i)}),
     }
 
   # Confirm in next 1..confirm_window
@@ -254,19 +256,18 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
       prev = gg.loc[j - 1]
       cur = gg.loc[j]
       close_strength = float(cur["close"]) > float(prev["close"])
-      vol_ok = float(cur["volume"]) <= p.confirm_vol_max_mult * v0
-      if (p.confirm_close_strength and close_strength) or vol_ok:
+      vol_ok2 = float(cur["volume"]) <= p.confirm_vol_max_mult * v0
+      if (p.confirm_close_strength and close_strength) or vol_ok2:
         confirmed = True
         confirm_date = cur["date"]
         break
 
-  # Scoring
+  # Base score only (ranking score computed in report)
   last_close = float(gg.iloc[-1]["close"])
   dist = abs(last_close - l0)
-  s1 = 1.0 - float(shrink_ratio)
-  s2 = max(0.0, 1.0 - dist / (1.0 * atr0 + EPS))
-  s3 = float(gg.iloc[-1]["atr"]) / (last_close + EPS)
-  score = 0.45 * s1 + 0.35 * s2 + 0.20 * min(0.20, s3)
+  s_shrink = _clamp(1.0 - float(shrink_ratio))
+  s_prox = _clamp(1.0 - dist / (1.0 * atr0 + EPS))
+  base_score = 0.55 * s_shrink + 0.45 * s_prox
 
   state = "RETEST_CONFIRMED" if confirmed else "RETEST_CANDIDATE"
 
@@ -282,21 +283,24 @@ def evaluate_ticker(df: pd.DataFrame, params: Params, ticker: Optional[str] = No
     "confirm_date": (str(confirm_date.date()) if confirm_date is not None else None),
     "shrink_ratio": float(shrink_ratio),
     "stop": l0 - p.stop_atr * atr0,
-    "score": float(score),
+    "score": float(base_score),
     "watch": True,
     "action": bool(confirmed),
+    "features": pack_features({
+      "d0_i": int(d0_i),
+      "retest_i": int(retest_i),
+      "dist_to_l0_atr": float(dist / (atr0 + EPS)),
+      "s_shrink": float(s_shrink),
+      "s_prox": float(s_prox),
+      "score_base": float(base_score),
+    }),
   }
 
 
 # -----------------------------
-# Adapter: required by generate_signals (YAML-driven)
+# Adapter: required by generate_signals (UNCHANGED normalization)
 # -----------------------------
 def _build_params(params_dict: Optional[dict]) -> Params:
-  """
-  Robustly construct Params from a dict:
-  - if Params(**dict) works, use it
-  - otherwise create Params() and setattr known fields
-  """
   params_dict = params_dict or {}
   try:
     return Params(**params_dict)
@@ -313,20 +317,14 @@ def _build_params(params_dict: Optional[dict]) -> Params:
 
 def evaluate(df: pd.DataFrame, params: dict) -> Dict[str, Any]:
   """
-  Standard interface for the multi-strategy runner.
-  Returns shape:
-    {state, score, stop, meta}
-  Where 'state' is normalized to ENTRY/WATCH/PASS/ERROR so downstream is consistent,
-  while the original rich state is preserved in meta["raw_state"] and meta payload.
+  Standard interface for multi-strategy runner.
+  Returns shape: {state, score, stop, meta}
+  Normalized state: ENTRY/WATCH/PASS/ERROR
+  Raw state preserved in meta["raw_state"].
   """
   p = _build_params(params)
-
   try:
     raw = evaluate_ticker(df, params=p)
-    # Normalize to pipeline-friendly states
-    # - action True => ENTRY
-    # - watch True => WATCH
-    # - else PASS
     raw_state = str(raw.get("state", "PASS"))
     action = bool(raw.get("action", False))
     watch = bool(raw.get("watch", False))
@@ -346,8 +344,8 @@ def evaluate(df: pd.DataFrame, params: dict) -> Dict[str, Any]:
       "stop": raw.get("stop", None),
       "meta": {
         "raw_state": raw_state,
+        "features": raw.get("features", {}) or {},
         "params": p.__dict__,
-        "raw": raw,
       },
     }
   except Exception as e:
@@ -357,4 +355,3 @@ def evaluate(df: pd.DataFrame, params: dict) -> Dict[str, Any]:
       "stop": None,
       "meta": {"error": str(e), "params": p.__dict__},
     }
-
