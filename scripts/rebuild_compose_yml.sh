@@ -1,3 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# Backup existing compose file (if present)
+if [ -f docker-compose.yml ]; then
+  ts="$(date +%F_%H%M%S)"
+  cp docker-compose.yml "docker-compose.yml.bak.${ts}"
+  echo "[OK] Backed up docker-compose.yml -> docker-compose.yml.bak.${ts}"
+fi
+
+cat > docker-compose.yml <<'YAML'
 services:
   universe_fetch:
     build: .
@@ -93,3 +106,10 @@ services:
       # Optional: OpenBB creds mount (only if you configure it)
       # - ./.openbb_platform:/root/.openbb_platform:ro
     entrypoint: ["python", "-m", "src.jobs.finra_fetch"]
+YAML
+
+echo "[OK] Wrote docker-compose.yml"
+
+# Validate
+docker compose config >/dev/null
+echo "[OK] docker compose config validation passed"
