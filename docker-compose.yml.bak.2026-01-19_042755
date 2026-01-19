@@ -1,41 +1,13 @@
 services:
-  universe_fetch:
-    build: .
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    entrypoint: ["python", "-m", "src.jobs.universe_fetch"]
-
   eod_fetch:
     build: .
     env_file: .env
     volumes:
       - ./data:/app/data
+      - ./outputs:/app/outputs
       - ./logs:/app/logs
-      - ./configs:/app/configs:ro
       - ./tickers.txt:/app/tickers.txt:ro
     entrypoint: ["python", "-m", "src.jobs.eod_fetch"]
-
-  hourly_fetch:
-    build: .
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
-    entrypoint: ["python", "-m", "src.jobs.hourly_fetch"]
-
-  generate_signals:
-    build: .
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./configs:/app/configs:ro
-      - ./tickers.txt:/app/tickers.txt:ro
-    entrypoint: ["python", "-m", "src.jobs.generate_signals"]
 
   report:
     build: .
@@ -44,12 +16,11 @@ services:
       - ./data:/app/data
       - ./outputs:/app/outputs
       - ./logs:/app/logs
-      - ./configs:/app/configs:ro
       - ./tickers.txt:/app/tickers.txt:ro
-    # Keep this if your report code expects it; harmless otherwise
+      - ./configs:/app/configs:ro
     environment:
       - STRATEGY_CONFIG=/app/configs/retest_shrink.yaml
-    entrypoint: ["python", "-m", "src.jobs.report"]
+    command: ["python", "-m", "src.jobs.report"]
 
   email:
     build: .
@@ -57,7 +28,7 @@ services:
     volumes:
       - ./outputs:/app/outputs
       - ./logs:/app/logs
-    entrypoint: ["python", "-m", "src.jobs.send_email"]
+    command: ["python", "-m", "src.jobs.send_email"]
 
   backtest:
     build: .
@@ -79,9 +50,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
-      # Optional: OpenBB creds mount (only if you configure it)
+      # Optional: OpenBB creds mount (add when you configure it)
       # - ./.openbb_platform:/root/.openbb_platform:ro
-    entrypoint: ["python", "-m", "src.jobs.fred_fetch"]
+    command: ["python", "-m", "src.jobs.fred_fetch"]
 
   finra_fetch:
     build: .
@@ -90,6 +61,37 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
-      # Optional: OpenBB creds mount (only if you configure it)
+      # Optional: OpenBB creds mount (add when you configure it)
       # - ./.openbb_platform:/root/.openbb_platform:ro
-    entrypoint: ["python", "-m", "src.jobs.finra_fetch"]
+    command: ["python", "-m", "src.jobs.finra_fetch"]
+
+  universe_fetch:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    entrypoint: ["python", "-m", "src.jobs.universe_fetch"]
+
+  generate_signals:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      - ./src:/app/src:ro
+    environment:
+      - STRATEGIES_CONFIG=/app/configs/strategies.yaml
+    entrypoint: ["python", "-m", "src.jobs.generate_signals"]
+
+  hourly_fetch:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      - ./tickers.txt:/app/tickers.txt:ro
+    entrypoint: ["python", "-m", "src.jobs.hourly_fetch"]
+

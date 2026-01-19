@@ -15,6 +15,27 @@ CREATE TABLE IF NOT EXISTS prices_daily (
 );
 """
 
+HOURLY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS prices_hourly (
+  ticker   TEXT NOT NULL,
+  ts       TEXT NOT NULL,   -- ISO timestamp in UTC from Alpaca (e.g. 2026-01-16T15:00:00Z)
+  date_et  TEXT NOT NULL,   -- derived ET trading date YYYY-MM-DD
+  open     REAL,
+  high     REAL,
+  low      REAL,
+  close    REAL,
+  volume   REAL,
+  PRIMARY KEY (ticker, ts)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prices_hourly_date_ticker
+  ON prices_hourly(date_et, ticker);
+
+CREATE INDEX IF NOT EXISTS idx_prices_hourly_ticker_ts
+  ON prices_hourly(ticker, ts);
+"""
+
+
 DERIVED_SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals_daily (
   date TEXT NOT NULL,
@@ -47,8 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_universe_date
   ON universe_daily(date);
 """
 
-DB_SCHEMA = RAW_SCHEMA + "\n" + DERIVED_SCHEMA
-
+DB_SCHEMA = RAW_SCHEMA + "\n" + HOURLY_SCHEMA + "\n" + DERIVED_SCHEMA
 
 def get_db_path() -> str:
   return os.environ.get("DB_PATH", "/app/data/app.db")
