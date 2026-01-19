@@ -1,7 +1,12 @@
-import os
-import json
+from __future__ import annotations
+
 import argparse
 import importlib
+import json
+import os
+import datetime as dt
+from typing import Any, Dict, Optional
+
 import pandas as pd
 import yaml
 
@@ -14,7 +19,7 @@ log = setup_logger("generate_signals")
 
 def load_yaml(path: str) -> dict:
   with open(path, "r", encoding="utf-8") as f:
-    return yaml.safe_load(f)
+    return yaml.safe_load(f) or {}
 
 
 def read_universe(date_str: str, source: str) -> list[str]:
@@ -26,11 +31,9 @@ def read_universe(date_str: str, source: str) -> list[str]:
   return [r[0] for r in rows]
 
 
-def read_prices_window(end_date: str, lookback_days: int) -> pd.DataFrame:
-  import datetime
-  end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
-  start = (end - datetime.timedelta(days=lookback_days)).isoformat()
-
+def read_prices_daily_window(end_date: str, lookback_days: int) -> pd.DataFrame:
+  end = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+  start = (end - dt.timedelta(days=lookback_days)).isoformat()
   with connect() as conn:
     q = """
       SELECT ticker, date, open, high, low, close, volume
@@ -38,11 +41,29 @@ def read_prices_window(end_date: str, lookback_days: int) -> pd.DataFrame:
       WHERE date BETWEEN ? AND ?
     """
     df = pd.read_sql_query(q, conn, params=(start, end_date))
-
   if df.empty:
     return df
-
   df["date"] = pd.to_datetime(df["date"])
+  return df
+
+
+def read_prices_hourly_window(end_date_et: str, lookback_days: int) -> pd.DataFrame:
+  """
+  Reads hourly bars by ET date bucket: prices_hourly(date_et).
+  lookback_days is calendar days.
+  """
+  end = dt.datetime.strptime(end_date_et, "%Y-%m-%d").date()
+  start = (end - dt.timedelta(days=lookback_days)).isoformat()
+  with connect() as conn:
+    q = """
+      SELECT ticker, ts, date_et, open, high, low, close, volume
+      FROM prices_hourly
+      WHERE date_et BETWEEN ? AND ?
+    """
+    df = pd.read_sql_query(q, conn, params=(start, end_date_et))
+  if df.empty:
+    return df
+  df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
   return df
 
 
@@ -65,10 +86,23 @@ def upsert_signals(rows: list[tuple]) -> int:
 
 
 def load_strategy(module_path: str):
-  mod = importlib.import_module(module_path)
+  return importlib.import_module(module_path)
+
+
+def call_evaluate(mod, dft: pd.DataFrame, params: dict, ctx: dict):
+  """
+  Supports:
+    evaluate(df, params=params)
+    evaluate(df, params=params, ctx=ctx)
+  """
   if not hasattr(mod, "evaluate"):
-    raise RuntimeError(f"{module_path} missing evaluate(df, params)")
-  return mod
+    raise RuntimeError(f"{mod.__name__} missing evaluate()")
+
+  fn = getattr(mod, "evaluate")
+  try:
+    return fn(dft, params=params, ctx=ctx)
+  except TypeError:
+    return fn(dft, params=params)
 
 
 def main():
@@ -86,9 +120,11 @@ def main():
 
   cfg = load_yaml(config_path)
   universe_source = cfg.get("universe_source", "alpaca")
-  lookback_days = int(cfg.get("lookback_days", 240))
-  strategies = cfg.get("strategies", [])
 
+  daily_lookback_days = int(cfg.get("daily_lookback_days", cfg.get("lookback_days", 240)))
+  hourly_lookback_days = int(cfg.get("hourly_lookback_days", 90))
+
+  strategies = cfg.get("strategies", []) or []
   if not strategies:
     raise RuntimeError(f"No strategies found in {config_path}")
 
@@ -98,14 +134,16 @@ def main():
   if args.limit:
     tickers = tickers[:args.limit]
 
-  df_all = read_prices_window(end_date=date_str, lookback_days=lookback_days)
-  if df_all.empty:
-    raise RuntimeError("No prices found in DB for requested window. Run eod_fetch/backfill first.")
+  df_daily_all = read_prices_daily_window(end_date=date_str, lookback_days=daily_lookback_days)
+  if df_daily_all.empty:
+    raise RuntimeError("No daily prices found in DB for requested window. Run eod_fetch/backfill first.")
+  df_daily_all = df_daily_all[df_daily_all["ticker"].isin(tickers)].copy()
 
-  # Filter to tickers in universe for speed
-  df_all = df_all[df_all["ticker"].isin(tickers)].copy()
+  df_hourly_all = read_prices_hourly_window(end_date_et=date_str, lookback_days=hourly_lookback_days)
+  if not df_hourly_all.empty:
+    df_hourly_all = df_hourly_all[df_hourly_all["ticker"].isin(tickers)].copy()
 
-  wanted = set([s for s in (args.only or [])])
+  wanted = set(args.only or [])
   rows: list[tuple] = []
 
   for s in strategies:
@@ -113,24 +151,35 @@ def main():
     if wanted and name not in wanted:
       continue
 
-    module = s["module"]
+    module_path = s["module"]
     params = s.get("params", {}) or {}
 
-    mod = load_strategy(module)
+    mod = load_strategy(module_path)
 
     ok = 0
     fail = 0
 
     for t in tickers:
-      dft = df_all[df_all["ticker"] == t].sort_values("date")
+      dft = df_daily_all[df_daily_all["ticker"] == t].sort_values("date")
       if dft.empty:
         continue
+
+      dft_h = None
+      if not df_hourly_all.empty:
+        dft_h = df_hourly_all[df_hourly_all["ticker"] == t].sort_values("ts")
+
+      ctx = {
+        "trade_date": date_str,
+        "ticker": t,
+        "hourly": dft_h,  # can be None
+      }
+
       try:
-        res = mod.evaluate(dft, params=params)
+        res = call_evaluate(mod, dft, params=params, ctx=ctx) or {}
         state = str(res.get("state", "PASS"))
         score = res.get("score", None)
         stop = res.get("stop", None)
-        meta = res.get("meta", {})
+        meta = res.get("meta", {}) or {}
 
         rows.append((
           date_str,
@@ -146,7 +195,7 @@ def main():
         rows.append((date_str, t, name, "ERROR", None, None, json.dumps({"error": str(e)}, ensure_ascii=False)))
         fail += 1
 
-    log.info(f"Strategy done: {name} module={module} tickers={len(tickers)} ok={ok} fail={fail}")
+    log.info(f"Strategy done: {name} module={module_path} tickers={len(tickers)} ok={ok} fail={fail}")
 
   n = upsert_signals(rows)
   log.info(f"Signals upserted: date={date_str} rows={n} (tickers={len(tickers)} strategies={len(strategies)})")
