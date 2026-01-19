@@ -1,10 +1,9 @@
-from __future__ import annotations
-
+# src/jobs/report.py
 import os
 import json
+import math
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, List
+from typing import Dict, Any, Optional, Tuple, List
 
 import pandas as pd
 
@@ -14,11 +13,48 @@ from src.common.timeutil import last_completed_trading_day_et
 
 log = setup_logger("report")
 
-EPS = 1e-12
 
 # -----------------------------
-# Output paths
+# Ranking configuration (override via env if desired)
 # -----------------------------
+# Coverage gates
+MIN_DAILY_BARS = int(os.environ.get("REPORT_MIN_DAILY_BARS", "60"))
+MIN_HOURLY_BARS_TODAY = int(os.environ.get("REPORT_MIN_HOURLY_BARS_TODAY", "6"))
+
+# Liquidity normalization for dv20 (mean close*volume over 20 days)
+LIQ_DV20_MIN = float(os.environ.get("REPORT_LIQ_DV20_MIN", "1e7"))   # $10M
+LIQ_DV20_MAX = float(os.environ.get("REPORT_LIQ_DV20_MAX", "2e8"))   # $200M
+
+# Risk normalization (ATR% cap)
+RISK_ATR_PCT_MAX = float(os.environ.get("REPORT_RISK_ATR_PCT_MAX", "0.12"))
+
+# Retest-shrink rank weights
+RS_W_BASE = float(os.environ.get("REPORT_RS_W_BASE", "0.60"))
+RS_W_TREND = float(os.environ.get("REPORT_RS_W_TREND", "0.15"))
+RS_W_LIQ = float(os.environ.get("REPORT_RS_W_LIQ", "0.15"))
+RS_W_RISK = float(os.environ.get("REPORT_RS_W_RISK", "0.10"))
+
+# Retest-shrink base weights
+RS_W_SHRINK = float(os.environ.get("REPORT_RS_W_SHRINK", "0.55"))
+RS_W_PROX = float(os.environ.get("REPORT_RS_W_PROX", "0.45"))
+
+
+# MA cross ranking (v1 – simple but useful)
+MC_W_DAILY_TREND = float(os.environ.get("REPORT_MC_W_DAILY_TREND", "0.50"))
+MC_W_HOURLY_TREND = float(os.environ.get("REPORT_MC_W_HOURLY_TREND", "0.30"))
+MC_W_VOL = float(os.environ.get("REPORT_MC_W_VOL", "0.20"))
+
+
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+  if x is None or (isinstance(x, float) and math.isnan(x)):
+    return 0.0
+  if x < lo:
+    return lo
+  if x > hi:
+    return hi
+  return x
+
+
 def _out_dir_for_date(date: str) -> Path:
   out_dir = Path(os.environ.get("OUTPUT_DIR", "/app/outputs"))
   day_dir = out_dir / date
@@ -26,14 +62,11 @@ def _out_dir_for_date(date: str) -> Path:
   return day_dir
 
 
-# -----------------------------
-# DB reads
-# -----------------------------
-def read_signals(date: str) -> pd.DataFrame:
+def _read_signals(date: str) -> pd.DataFrame:
   with connect() as conn:
     df = pd.read_sql_query(
       """
-      SELECT date, ticker, strategy, state, score, stop, meta_json, created_at
+      SELECT date, ticker, strategy, state, score, stop, meta_json
       FROM signals_daily
       WHERE date = ?
       """,
@@ -43,487 +76,379 @@ def read_signals(date: str) -> pd.DataFrame:
   return df
 
 
-def _ph(tickers: List[str]) -> str:
-  return ",".join(["?"] * len(tickers))
+def _parse_meta(meta_json: Optional[str]) -> Dict[str, Any]:
+  if not meta_json:
+    return {}
+  try:
+    return json.loads(meta_json)
+  except Exception:
+    return {}
 
 
-def read_prices_daily_window(end_date: str, tickers: List[str], lookback_days: int) -> pd.DataFrame:
+def _sql_in_placeholders(n: int) -> str:
+  return ",".join(["?"] * n)
+
+
+def _read_prices_daily_window(end_date: str, tickers: List[str], lookback_days: int = 260) -> pd.DataFrame:
   if not tickers:
     return pd.DataFrame()
 
-  end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
-  start_d = end_d - timedelta(days=lookback_days)
+  import datetime
+  end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+  start = (end - datetime.timedelta(days=lookback_days)).isoformat()
+  ph = _sql_in_placeholders(len(tickers))
 
   with connect() as conn:
-    q = f"""
+    df = pd.read_sql_query(
+      f"""
       SELECT ticker, date, open, high, low, close, volume
       FROM prices_daily
       WHERE date BETWEEN ? AND ?
-        AND ticker IN ({_ph(tickers)})
-    """
-    df = pd.read_sql_query(q, conn, params=[start_d.isoformat(), end_date] + tickers)
+        AND ticker IN ({ph})
+      ORDER BY ticker, date
+      """,
+      conn,
+      params=[start, end_date] + tickers,
+    )
 
   if df.empty:
     return df
-
   df["date"] = pd.to_datetime(df["date"])
   for c in ["open", "high", "low", "close", "volume"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
   return df
 
 
-def read_prices_hourly_window(end_date_et: str, tickers: List[str], lookback_days: int) -> pd.DataFrame:
+def _read_prices_hourly_window(end_date: str, tickers: List[str], lookback_days: int = 35) -> pd.DataFrame:
   if not tickers:
     return pd.DataFrame()
 
-  end_d = datetime.strptime(end_date_et, "%Y-%m-%d").date()
-  start_d = end_d - timedelta(days=lookback_days)
+  import datetime
+  end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+  start = (end - datetime.timedelta(days=lookback_days)).isoformat()
+  ph = _sql_in_placeholders(len(tickers))
 
   with connect() as conn:
-    q = f"""
+    df = pd.read_sql_query(
+      f"""
       SELECT ticker, ts, date_et, open, high, low, close, volume
       FROM prices_hourly
       WHERE date_et BETWEEN ? AND ?
-        AND ticker IN ({_ph(tickers)})
-    """
-    df = pd.read_sql_query(q, conn, params=[start_d.isoformat(), end_date_et] + tickers)
+        AND ticker IN ({ph})
+      ORDER BY ticker, ts
+      """,
+      conn,
+      params=[start, end_date] + tickers,
+    )
 
   if df.empty:
     return df
-
-  # ts is RFC3339-like string from Alpaca; pandas can parse it
-  df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+  # ts is RFC3339-ish string; ordering already ensured by SQL
   for c in ["open", "high", "low", "close", "volume"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
   return df
 
 
-# -----------------------------
-# Feature engineering
-# -----------------------------
-def _compute_atr_14(g: pd.DataFrame) -> pd.Series:
-  high = g["high"].astype(float)
-  low = g["low"].astype(float)
-  close = g["close"].astype(float)
+def _compute_atr14(g: pd.DataFrame) -> pd.Series:
+  high = g["high"]
+  low = g["low"]
+  close = g["close"]
   prev_close = close.shift(1)
-
-  tr1 = (high - low).abs()
-  tr2 = (high - prev_close).abs()
-  tr3 = (low - prev_close).abs()
-  tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
+  tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
   return tr.rolling(window=14, min_periods=14).mean()
 
 
-def compute_daily_features(px: pd.DataFrame, end_date: str) -> pd.DataFrame:
-  """
-  Returns per-ticker features as-of end_date (or last available <= end_date):
-    daily_bar_count, close, volume, range_pct,
-    ma14/30/60/120, trend_daily_score,
-    atr14, atr_pct,
-    vol20, dollar_vol_20, vol_rel
-  """
-  if px.empty:
+def _stack_score_3(ma_fast: float, ma_mid: float, ma_slow: float) -> float:
+  # 0..1 with partial credit
+  if any(pd.isna(x) for x in [ma_fast, ma_mid, ma_slow]):
+    return 0.0
+  s = 0.0
+  if float(ma_fast) > float(ma_mid):
+    s += 0.5
+  if float(ma_mid) > float(ma_slow):
+    s += 0.5
+  return s
+
+
+def _stack_score_4(ma1: float, ma2: float, ma3: float, ma4: float) -> float:
+  # MA14>MA30>MA60>MA120 style: 3 comparisons => each 1/3
+  if any(pd.isna(x) for x in [ma1, ma2, ma3, ma4]):
+    return 0.0
+  s = 0.0
+  s += (1.0 / 3.0) if float(ma1) > float(ma2) else 0.0
+  s += (1.0 / 3.0) if float(ma2) > float(ma3) else 0.0
+  s += (1.0 / 3.0) if float(ma3) > float(ma4) else 0.0
+  return float(s)
+
+
+def _liq_score(dv20: Optional[float]) -> float:
+  if dv20 is None or dv20 <= 0:
+    return 0.0
+  return _clamp((dv20 - LIQ_DV20_MIN) / (LIQ_DV20_MAX - LIQ_DV20_MIN + 1e-12))
+
+
+def _risk_score(atr_pct: Optional[float]) -> float:
+  if atr_pct is None or atr_pct <= 0:
+    return 0.0
+  return _clamp(1.0 - (atr_pct / (RISK_ATR_PCT_MAX + 1e-12)))
+
+
+def _build_daily_features(daily: pd.DataFrame, report_date: str) -> pd.DataFrame:
+  if daily.empty:
     return pd.DataFrame()
 
-  px = px.sort_values(["ticker", "date"]).copy()
-  px["range_pct"] = (px["high"] - px["low"]) / (px["close"].abs() + EPS)
-  px["dollar_vol"] = (px["close"].abs() * px["volume"].abs())
-
-  feats = []
-  end_ts = pd.to_datetime(end_date)
-
-  for t, g in px.groupby("ticker", sort=False):
+  rows = []
+  for t, g in daily.groupby("ticker", sort=False):
     g = g.sort_values("date").reset_index(drop=True)
-    g = g[g["date"] <= end_ts].copy()
-    if g.empty:
+
+    g["dollar_vol"] = (g["close"].abs() * g["volume"].abs())
+    g["dv20"] = g["dollar_vol"].rolling(20, min_periods=20).mean()
+    g["atr14"] = _compute_atr14(g)
+    g["atr_pct"] = g["atr14"] / (g["close"].abs() + 1e-12)
+
+    # MAs for retest trend context
+    g["ma20"] = g["close"].rolling(20, min_periods=20).mean()
+    g["ma50"] = g["close"].rolling(50, min_periods=50).mean()
+    g["ma200"] = g["close"].rolling(200, min_periods=200).mean()
+
+    # MAs for MA stack scoring
+    g["ma14"] = g["close"].rolling(14, min_periods=14).mean()
+    g["ma30"] = g["close"].rolling(30, min_periods=30).mean()
+    g["ma60"] = g["close"].rolling(60, min_periods=60).mean()
+    g["ma120"] = g["close"].rolling(120, min_periods=120).mean()
+
+    g["date_s"] = g["date"].dt.strftime("%Y-%m-%d")
+    last = g[g["date_s"] == report_date].tail(1)
+    if last.empty:
       continue
+    lr = last.iloc[0]
 
-    g["atr14"] = _compute_atr_14(g)
-    for w in (14, 30, 60, 120):
-      g[f"ma{w}"] = g["close"].rolling(window=w, min_periods=w).mean()
+    daily_bars = int(g[g["date_s"] <= report_date].shape[0])
 
-    g["vol20"] = g["volume"].rolling(window=20, min_periods=20).mean()
-    g["dollar_vol_20"] = g["dollar_vol"].rolling(window=20, min_periods=20).mean()
+    trend_rs = _stack_score_3(lr.get("ma20"), lr.get("ma50"), lr.get("ma200"))
+    trend_stack_4 = _stack_score_4(lr.get("ma14"), lr.get("ma30"), lr.get("ma60"), lr.get("ma120"))
 
-    last = g.iloc[-1]
-
-    ma14 = last.get("ma14")
-    ma30 = last.get("ma30")
-    ma60 = last.get("ma60")
-    ma120 = last.get("ma120")
-
-    # MA stack score: MA14>MA30>MA60>MA120 (0..3)
-    td = 0
-    if pd.notna(ma14) and pd.notna(ma30) and ma14 > ma30:
-      td += 1
-    if pd.notna(ma30) and pd.notna(ma60) and ma30 > ma60:
-      td += 1
-    if pd.notna(ma60) and pd.notna(ma120) and ma60 > ma120:
-      td += 1
-
-    close = float(last["close"]) if pd.notna(last["close"]) else None
-    atr14 = float(last["atr14"]) if pd.notna(last.get("atr14")) else None
-    atr_pct = (atr14 / (close + EPS)) if (atr14 is not None and close is not None) else None
-
-    vol = float(last["volume"]) if pd.notna(last["volume"]) else None
-    vol20 = float(last["vol20"]) if pd.notna(last.get("vol20")) else None
-    vol_rel = (vol / (vol20 + EPS)) if (vol is not None and vol20 is not None) else None
-
-    feats.append({
+    rows.append({
       "ticker": t,
-      "daily_bar_count": int(len(g)),
-      "close": close,
-      "volume": vol,
-      "range_pct": float(last["range_pct"]) if pd.notna(last["range_pct"]) else None,
-      "ma14_d": float(ma14) if pd.notna(ma14) else None,
-      "ma30_d": float(ma30) if pd.notna(ma30) else None,
-      "ma60_d": float(ma60) if pd.notna(ma60) else None,
-      "ma120_d": float(ma120) if pd.notna(ma120) else None,
-      "trend_daily_score": td,
-      "atr14": atr14,
-      "atr_pct": float(atr_pct) if atr_pct is not None else None,
-      "vol20": vol20,
-      "dollar_vol_20": float(last["dollar_vol_20"]) if pd.notna(last.get("dollar_vol_20")) else None,
-      "vol_rel": float(vol_rel) if vol_rel is not None else None,
+      "daily_bars": daily_bars,
+      "close": float(lr["close"]) if pd.notna(lr["close"]) else None,
+      "volume": float(lr["volume"]) if pd.notna(lr["volume"]) else None,
+      "range_pct": (float(lr["high"]) - float(lr["low"])) / (float(lr["close"]) + 1e-12) if pd.notna(lr["close"]) else None,
+      "dv20": float(lr["dv20"]) if pd.notna(lr["dv20"]) else None,
+      "atr14": float(lr["atr14"]) if pd.notna(lr["atr14"]) else None,
+      "atr_pct": float(lr["atr_pct"]) if pd.notna(lr["atr_pct"]) else None,
+      "trend_rs": float(trend_rs),
+      "trend_stack_4_daily": float(trend_stack_4),
+      "ma14": float(lr["ma14"]) if pd.notna(lr["ma14"]) else None,
+      "ma30": float(lr["ma30"]) if pd.notna(lr["ma30"]) else None,
+      "ma60": float(lr["ma60"]) if pd.notna(lr["ma60"]) else None,
+      "ma120": float(lr["ma120"]) if pd.notna(lr["ma120"]) else None,
     })
 
-  return pd.DataFrame(feats)
+  return pd.DataFrame(rows)
 
 
-def compute_hourly_features(hx: pd.DataFrame, trade_date_et: str) -> pd.DataFrame:
-  """
-  Returns per-ticker hourly features as-of last bar <= trade_date_et end:
-    hourly_bar_count_window, hourly_bar_count_trade_date,
-    ma14/30/60/120 (hourly), trend_hourly_score
-  """
-  if hx.empty:
+def _build_hourly_features(hourly: pd.DataFrame, report_date: str) -> pd.DataFrame:
+  if hourly.empty:
     return pd.DataFrame()
 
-  hx = hx.sort_values(["ticker", "ts"]).copy()
-
-  feats = []
-  for t, g in hx.groupby("ticker", sort=False):
+  rows = []
+  for t, g in hourly.groupby("ticker", sort=False):
     g = g.sort_values("ts").reset_index(drop=True)
-    if g.empty:
+
+    # Only compute on close series
+    g["ma14"] = g["close"].rolling(14, min_periods=14).mean()
+    g["ma30"] = g["close"].rolling(30, min_periods=30).mean()
+    g["ma60"] = g["close"].rolling(60, min_periods=60).mean()
+    g["ma120"] = g["close"].rolling(120, min_periods=120).mean()
+
+    # coverage on the report date
+    bars_today = int((g["date_et"] == report_date).sum())
+
+    last = g[g["date_et"] == report_date].tail(1)
+    if last.empty:
+      # still keep coverage (0) info
+      rows.append({
+        "ticker": t,
+        "hourly_bars_today": bars_today,
+        "trend_stack_4_hourly": 0.0,
+      })
       continue
 
-    for w in (14, 30, 60, 120):
-      g[f"ma{w}"] = g["close"].rolling(window=w, min_periods=w).mean()
+    lr = last.iloc[0]
+    trend_stack = _stack_score_4(lr.get("ma14"), lr.get("ma30"), lr.get("ma60"), lr.get("ma120"))
 
-    last = g.iloc[-1]
-    ma14 = last.get("ma14")
-    ma30 = last.get("ma30")
-    ma60 = last.get("ma60")
-    ma120 = last.get("ma120")
-
-    th = 0
-    if pd.notna(ma14) and pd.notna(ma30) and ma14 > ma30:
-      th += 1
-    if pd.notna(ma30) and pd.notna(ma60) and ma30 > ma60:
-      th += 1
-    if pd.notna(ma60) and pd.notna(ma120) and ma60 > ma120:
-      th += 1
-
-    cnt_trade = int((g["date_et"] == trade_date_et).sum())
-    feats.append({
+    rows.append({
       "ticker": t,
-      "hourly_bar_count_window": int(len(g)),
-      "hourly_bar_count_trade_date": cnt_trade,
-      "ma14_h": float(ma14) if pd.notna(ma14) else None,
-      "ma30_h": float(ma30) if pd.notna(ma30) else None,
-      "ma60_h": float(ma60) if pd.notna(ma60) else None,
-      "ma120_h": float(ma120) if pd.notna(ma120) else None,
-      "trend_hourly_score": th,
+      "hourly_bars_today": bars_today,
+      "trend_stack_4_hourly": float(trend_stack),
     })
 
-  return pd.DataFrame(feats)
+  return pd.DataFrame(rows)
 
 
-# -----------------------------
-# Meta parsing (retest_shrink needs fields inside meta_json)
-# -----------------------------
-def parse_meta_fields(df: pd.DataFrame) -> pd.DataFrame:
-  """
-  Extract a few useful fields without assuming a strict shape.
-  generate_signals stores meta_json from strategy adapter: {"raw_state","params","raw":{...}}
-  """
-  def _get(d: Any, path: List[str]) -> Any:
-    cur = d
-    for k in path:
-      if not isinstance(cur, dict):
-        return None
-      cur = cur.get(k)
-    return cur
+def _rank_retest_shrink(row: pd.Series) -> Tuple[Optional[float], str]:
+  # Requires shrink_ratio + dist_to_l0_atr from strategy meta.features,
+  # plus dv20/atr_pct/trend from daily features.
+  shrink_ratio = row.get("shrink_ratio")
+  dist_to_l0_atr = row.get("dist_to_l0_atr")
 
-  out = df.copy()
-  raw_states = []
-  shrink_ratios = []
-  l0s = []
-  atr0s = []
-  v0s = []
-  d0_dates = []
-  retest_dates = []
-  confirm_dates = []
+  if shrink_ratio is None or dist_to_l0_atr is None:
+    return None, "missing_core_features"
 
-  for s in out.get("meta_json", pd.Series([None] * len(out))):
-    try:
-      meta = json.loads(s) if isinstance(s, str) and s else {}
-    except Exception:
-      meta = {}
+  s_shrink = _clamp(1.0 - float(shrink_ratio))
+  s_prox = _clamp(1.0 - float(dist_to_l0_atr))  # already in ATR units
+  base = RS_W_SHRINK * s_shrink + RS_W_PROX * s_prox
 
-    raw_state = _get(meta, ["raw_state"])
-    raw = _get(meta, ["raw"])  # this should be the rich dict
-    if not isinstance(raw, dict):
-      raw = {}
+  trend = float(row.get("trend_rs", 0.0))
+  liq = _liq_score(row.get("dv20"))
+  risk = _risk_score(row.get("atr_pct"))
 
-    raw_states.append(raw_state if raw_state is not None else None)
-    shrink_ratios.append(_get(raw, ["shrink_ratio"]))
-    l0s.append(_get(raw, ["l0"]))
-    atr0s.append(_get(raw, ["atr0"]))
-    v0s.append(_get(raw, ["v0"]))
-    d0_dates.append(_get(raw, ["d0_date"]))
-    retest_dates.append(_get(raw, ["retest_date"]))
-    confirm_dates.append(_get(raw, ["confirm_date"]))
-
-  out["raw_state"] = raw_states
-  out["shrink_ratio"] = pd.to_numeric(shrink_ratios, errors="coerce")
-  out["l0"] = pd.to_numeric(l0s, errors="coerce")
-  out["atr0"] = pd.to_numeric(atr0s, errors="coerce")
-  out["v0"] = pd.to_numeric(v0s, errors="coerce")
-  out["d0_date"] = d0_dates
-  out["retest_date"] = retest_dates
-  out["confirm_date"] = confirm_dates
-  return out
+  score = RS_W_BASE * base + RS_W_TREND * trend + RS_W_LIQ * liq + RS_W_RISK * risk
+  reason = f"base={base:.3f} trend={trend:.2f} liq={liq:.2f} risk={risk:.2f}"
+  return float(score), reason
 
 
-# -----------------------------
-# Ranking
-# -----------------------------
-def _state_rank(s: str) -> int:
-  # lower is "more important"
-  s = (s or "").upper()
-  order = {
-    "ENTRY": 0,
-    "EXIT": 1,
-    "WATCH": 2,
-    "PASS": 3,
-    "ERROR": 9,
-  }
-  return order.get(s, 5)
+def _rank_ma_cross(row: pd.Series) -> Tuple[Optional[float], str]:
+  # Minimal v1 ranking: daily trend stack + hourly trend stack + volume quality proxy
+  td = float(row.get("trend_stack_4_daily", 0.0))
+  th = float(row.get("trend_stack_4_hourly", 0.0))
+
+  # Volume quality proxy: dv20 normalized (works even before you add more volume-pattern logic)
+  liq = _liq_score(row.get("dv20"))
+  score = MC_W_DAILY_TREND * td + MC_W_HOURLY_TREND * th + MC_W_VOL * liq
+  reason = f"daily_stack={td:.2f} hourly_stack={th:.2f} liq={liq:.2f}"
+  return float(score), reason
 
 
-def compute_rank_scores(df: pd.DataFrame) -> pd.DataFrame:
-  out = df.copy()
-
-  # Liquidity scaler: log10(dollar_vol_20+1) => typical range ~ 4..9
-  out["liq_log10"] = (out["dollar_vol_20"].fillna(0) + 1.0).apply(lambda x: float(pd.np.log10(x)) if x > 0 else 0.0)  # type: ignore
-
-  # Normalize some terms into rough 0..1 bands
-  out["trend_d_n"] = out["trend_daily_score"].fillna(0) / 3.0
-  out["trend_h_n"] = out["trend_hourly_score"].fillna(0) / 3.0
-
-  # vol_rel: cap at 2.0, scale to 0..1
-  vr = out["vol_rel"].copy()
-  out["vol_rel_n"] = (vr.clip(lower=0, upper=2.0) / 2.0).fillna(0)
-
-  # atr_pct: penalty, cap at 0.12 (12% ATR)
-  ap = out["atr_pct"].copy()
-  out["risk_pen_n"] = (ap.clip(lower=0, upper=0.12) / 0.12).fillna(0)
-
-  # retest proximity: dist to l0 in ATR0 units
-  dist_atr = (out["close"] - out["l0"]).abs() / (out["atr0"] + EPS)
-  out["dist_to_l0_atr"] = dist_atr
-  out["prox_n"] = (1.0 / (1.0 + dist_atr)).fillna(0)
-
-  # shrink quality: 1 - shrink_ratio (clip 0..1)
-  out["shrink_n"] = (1.0 - out["shrink_ratio"]).clip(lower=0, upper=1).fillna(0)
-
-  # Liquidity: map log10 to 0..1 using 4..9 typical band
-  out["liq_n"] = ((out["liq_log10"] - 4.0) / 5.0).clip(lower=0, upper=1).fillna(0)
-
-  def _rank_row(r: pd.Series) -> float:
-    strat = str(r.get("strategy", ""))
-    # Default: fall back to strategy score if present
-    base = r.get("score", None)
-    base_n = 0.0
-    try:
-      if base is not None and pd.notna(base):
-        # light compression
-        base_n = float(max(0.0, min(1.0, float(base))))
-    except Exception:
-      base_n = 0.0
-
-    # MA cross ranking: trend + liquidity + volume + risk
-    if strat == "ma_cross_5_10":
-      return float(
-        0.45 * r.get("trend_d_n", 0.0) +
-        0.25 * r.get("trend_h_n", 0.0) +
-        0.15 * r.get("vol_rel_n", 0.0) +
-        0.15 * r.get("liq_n", 0.0) -
-        0.15 * r.get("risk_pen_n", 0.0) +
-        0.05 * base_n
-      )
-
-    # Retest/shrink ranking: shrink quality + proximity + trend + liquidity - risk
-    if strat.startswith("retest_shrink"):
-      return float(
-        0.45 * r.get("shrink_n", 0.0) +
-        0.25 * r.get("prox_n", 0.0) +
-        0.15 * r.get("trend_d_n", 0.0) +
-        0.15 * r.get("liq_n", 0.0) -
-        0.20 * r.get("risk_pen_n", 0.0)
-      )
-
-    # Generic fallback
-    return float(
-      0.40 * r.get("trend_d_n", 0.0) +
-      0.20 * r.get("trend_h_n", 0.0) +
-      0.20 * r.get("liq_n", 0.0) +
-      0.10 * r.get("vol_rel_n", 0.0) -
-      0.15 * r.get("risk_pen_n", 0.0) +
-      0.05 * base_n
-    )
-
-  out["rank_score"] = out.apply(_rank_row, axis=1)
-  return out
-
-
-# -----------------------------
-# Main
-# -----------------------------
 def main():
   init_db()
 
   date = os.environ.get("REPORT_DATE") or last_completed_trading_day_et()
-  day_dir = _out_dir_for_date(date)
+  out_dir = _out_dir_for_date(date)
 
-  df = read_signals(date)
+  df = _read_signals(date)
   if df.empty:
     raise RuntimeError(f"No signals found for {date}. Run generate_signals first.")
 
-  # Normalize numeric
+  # normalize numeric
   df["score"] = pd.to_numeric(df["score"], errors="coerce")
   df["stop"] = pd.to_numeric(df["stop"], errors="coerce")
-  df["ticker"] = df["ticker"].astype(str)
 
-  # Parse meta fields (for retest_shrink ranking)
-  df = parse_meta_fields(df)
+  # parse meta/features
+  metas = df["meta_json"].apply(_parse_meta)
+  df["raw_state"] = metas.apply(lambda m: m.get("raw_state"))
+  df["features"] = metas.apply(lambda m: m.get("features") or {})
 
-  # Build features only for tickers present today
-  tickers = df["ticker"].dropna().astype(str).unique().tolist()
+  # pull core strategy features into columns (safe if absent)
+  df["shrink_ratio"] = df["features"].apply(lambda f: f.get("shrink_ratio"))
+  df["dist_to_l0_atr"] = df["features"].apply(lambda f: f.get("dist_to_l0_atr"))
 
-  DAILY_LOOKBACK_DAYS = int(os.environ.get("DAILY_LOOKBACK_DAYS", "300"))
-  HOURLY_LOOKBACK_DAYS = int(os.environ.get("HOURLY_LOOKBACK_DAYS", "30"))
+  tickers = sorted(df["ticker"].dropna().astype(str).unique().tolist())
 
-  px = read_prices_daily_window(end_date=date, tickers=tickers, lookback_days=DAILY_LOOKBACK_DAYS)
-  hx = read_prices_hourly_window(end_date_et=date, tickers=tickers, lookback_days=HOURLY_LOOKBACK_DAYS)
+  # Build daily & hourly feature tables
+  daily_hist = _read_prices_daily_window(date, tickers, lookback_days=260)
+  daily_feat = _build_daily_features(daily_hist, date)
 
-  daily_f = compute_daily_features(px, end_date=date)
-  hourly_f = compute_hourly_features(hx, trade_date_et=date)
+  hourly_hist = _read_prices_hourly_window(date, tickers, lookback_days=35)
+  hourly_feat = _build_hourly_features(hourly_hist, date)
 
-  if not daily_f.empty:
-    df = df.merge(daily_f, on="ticker", how="left")
+  # Merge pricing/feature info
+  if not daily_feat.empty:
+    df = df.merge(daily_feat, on="ticker", how="left")
   else:
-    # ensure columns exist
-    for c in ["daily_bar_count","close","volume","range_pct","ma14_d","ma30_d","ma60_d","ma120_d",
-              "trend_daily_score","atr14","atr_pct","vol20","dollar_vol_20","vol_rel"]:
-      df[c] = pd.NA
+    df["daily_bars"] = None
 
-  if not hourly_f.empty:
-    df = df.merge(hourly_f, on="ticker", how="left")
+  if not hourly_feat.empty:
+    df = df.merge(hourly_feat, on="ticker", how="left")
   else:
-    for c in ["hourly_bar_count_window","hourly_bar_count_trade_date",
-              "ma14_h","ma30_h","ma60_h","ma120_h","trend_hourly_score"]:
-      df[c] = pd.NA
+    df["hourly_bars_today"] = None
+    df["trend_stack_4_hourly"] = 0.0
 
-  # Coverage gating (tunable)
-  DAILY_MIN_BARS = int(os.environ.get("DAILY_MIN_BARS", "120"))
-  HOURLY_MIN_BARS_TRADE_DATE = int(os.environ.get("HOURLY_MIN_BARS_TRADE_DATE", "5"))
+  # Coverage gates
+  df["coverage_daily_ok"] = df["daily_bars"].fillna(0).astype(int) >= MIN_DAILY_BARS
+  df["coverage_hourly_ok"] = df["hourly_bars_today"].fillna(0).astype(int) >= MIN_HOURLY_BARS_TODAY
+  df["coverage_ok"] = df["coverage_daily_ok"]  # hourly optional for now; can tighten later
 
-  # By default: require dollar_vol_20 present; optional min threshold
-  DOLLAR_VOL20_MIN = float(os.environ.get("DOLLAR_VOL20_MIN", "0"))
+  # Rank score
+  rank_scores = []
+  rank_reasons = []
+  for _, r in df.iterrows():
+    strat = str(r["strategy"])
+    if "retest" in strat:
+      s, reason = _rank_retest_shrink(r)
+    elif "ma_cross" in strat or "ma" in strat:
+      s, reason = _rank_ma_cross(r)
+    else:
+      s, reason = (None, "no_ranker")
+    rank_scores.append(s)
+    rank_reasons.append(reason)
 
-  df["coverage_ok"] = (
-    (pd.to_numeric(df["daily_bar_count"], errors="coerce").fillna(0) >= DAILY_MIN_BARS) &
-    (pd.to_numeric(df["hourly_bar_count_trade_date"], errors="coerce").fillna(0) >= HOURLY_MIN_BARS_TRADE_DATE) &
-    (pd.to_numeric(df["dollar_vol_20"], errors="coerce").notna()) &
-    (pd.to_numeric(df["dollar_vol_20"], errors="coerce").fillna(-1) >= DOLLAR_VOL20_MIN)
-  )
+  df["rank_score"] = rank_scores
+  df["rank_reason"] = rank_reasons
 
-  # Ranking
-  df = compute_rank_scores(df)
+  # Sort with rank_score as primary (fallback to score)
+  df["rank_score_num"] = pd.to_numeric(df["rank_score"], errors="coerce")
+  df["sort_score"] = df["rank_score_num"].fillna(df["score"])
 
-  # Prepare outputs
-  strategies = sorted(df["strategy"].dropna().unique().tolist())
-
-  summary_lines: List[str] = []
-  summary_lines.append(f"Report date: {date}")
-  summary_lines.append(f"Strategies: {', '.join(strategies)}")
-  summary_lines.append("")
-  summary_lines.append("Coverage thresholds:")
-  summary_lines.append(f"  DAILY_MIN_BARS={DAILY_MIN_BARS}")
-  summary_lines.append(f"  HOURLY_MIN_BARS_TRADE_DATE={HOURLY_MIN_BARS_TRADE_DATE}")
-  summary_lines.append(f"  DOLLAR_VOL20_MIN={DOLLAR_VOL20_MIN}")
-  summary_lines.append("")
-
-  # Per-strategy CSVs
-  files_written = 0
-  for strat in strategies:
+  # Write per-strategy debug outputs
+  for strat in sorted(df["strategy"].unique().tolist()):
     d = df[df["strategy"] == strat].copy()
+    d = d.sort_values(["state", "sort_score"], ascending=[True, False])
+    out_csv = out_dir / f"signals_{strat}.csv"
+    d.to_csv(out_csv, index=False)
 
-    # Sort by state importance then rank_score desc (nulls last)
-    d["state_rank"] = d["state"].apply(_state_rank)
-    d = d.sort_values(["state_rank", "rank_score"], ascending=[True, False], na_position="last")
-
-    out_csv = day_dir / f"signals_{strat}.csv"
-    d.drop(columns=["state_rank"], errors="ignore").to_csv(out_csv, index=False)
-    files_written += 1
-
-    counts = d["state"].value_counts(dropna=False).to_dict()
-    cov_ok = int(d["coverage_ok"].fillna(False).sum())
-    summary_lines.append(f"[{strat}] states: " + ", ".join([f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: str(kv[0]))]))
-    summary_lines.append(f"[{strat}] coverage_ok: {cov_ok}/{len(d)}")
-    summary_lines.append("")
-
-  # Build action/watch lists (to satisfy email job)
-  def _dedup_best(x: pd.DataFrame) -> pd.DataFrame:
-    if x.empty:
-      return x
-    x = x.sort_values(["rank_score"], ascending=[False], na_position="last")
-    return x.drop_duplicates(subset=["ticker"], keep="first")
-
-  action = df[df["state"].isin(["ENTRY", "EXIT"]) & df["coverage_ok"].fillna(False)].copy()
-  watch = df[(df["state"] == "WATCH") & df["coverage_ok"].fillna(False)].copy()
-
-  action = _dedup_best(action)
-  watch = _dedup_best(watch)
-
-  # Keep columns concise for email
-  keep_cols = [
-    "ticker","strategy","state","rank_score",
-    "close","stop","dollar_vol_20","trend_daily_score","trend_hourly_score","atr_pct",
-    "raw_state","shrink_ratio","dist_to_l0_atr",
+  # Build action/watch lists for email
+  # Keep email stable: must produce action_list.csv and watch_list.csv
+  common_cols = [
+    "date", "ticker", "strategy", "state", "raw_state",
+    "rank_score", "rank_reason", "score", "stop",
+    "close", "volume", "range_pct", "dv20", "atr_pct",
+    "trend_rs", "trend_stack_4_daily", "trend_stack_4_hourly",
+    "daily_bars", "hourly_bars_today",
+    "coverage_ok", "coverage_daily_ok", "coverage_hourly_ok",
   ]
-  action_out = action[[c for c in keep_cols if c in action.columns]].copy()
-  watch_out = watch[[c for c in keep_cols if c in watch.columns]].copy()
+  for c in common_cols:
+    if c not in df.columns:
+      df[c] = None
 
-  action_path = day_dir / "action_list.csv"
-  watch_path = day_dir / "watch_list.csv"
-  action_out.to_csv(action_path, index=False)
-  watch_out.to_csv(watch_path, index=False)
-  files_written += 2
+  action = df[(df["state"] == "ENTRY") & (df["coverage_ok"])].copy()
+  action = action.sort_values(["sort_score"], ascending=[False])
+  action.to_csv(out_dir / "action_list.csv", index=False, columns=common_cols)
 
-  # Summary extras
-  summary_lines.append("Top ACTION (up to 10): " + ", ".join(action_out["ticker"].astype(str).head(10).tolist()) if not action_out.empty else "Top ACTION: (none)")
-  summary_lines.append("Top WATCH  (up to 10): " + ", ".join(watch_out["ticker"].astype(str).head(10).tolist()) if not watch_out.empty else "Top WATCH: (none)")
+  watch = df[(df["state"] == "WATCH") & (df["coverage_ok"])].copy()
+  watch = watch.sort_values(["sort_score"], ascending=[False])
+  watch.to_csv(out_dir / "watch_list.csv", index=False, columns=common_cols)
+
+  # Summary
+  summary_lines = []
+  summary_lines.append(f"Report date: {date}")
+  summary_lines.append(f"Strategies: {', '.join(sorted(df['strategy'].unique().tolist()))}")
+  summary_lines.append("")
+  summary_lines.append(f"Coverage gate: daily_bars>={MIN_DAILY_BARS}, hourly_bars_today>={MIN_HOURLY_BARS_TODAY} (hourly currently optional)")
+  summary_lines.append(f"Universe tickers in signals: {df['ticker'].nunique()}")
+  summary_lines.append(f"Coverage OK: {int(df['coverage_ok'].sum())}/{len(df)} rows")
   summary_lines.append("")
 
-  summary_path = day_dir / "summary.txt"
-  summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
-  files_written += 1
+  for strat in sorted(df["strategy"].unique().tolist()):
+    d = df[df["strategy"] == strat]
+    counts = d["state"].value_counts(dropna=False).to_dict()
+    summary_lines.append(f"[{strat}] states: " + ", ".join([f"{k}={v}" for k, v in sorted(counts.items())]))
+  summary_lines.append("")
 
-  log.info(f"Wrote reports to {day_dir} (files={files_written})")
+  def top_list(state: str, n: int = 10) -> List[str]:
+    x = df[(df["state"] == state) & (df["coverage_ok"])].copy()
+    x = x.sort_values(["sort_score"], ascending=[False]).head(n)
+    return x["ticker"].astype(str).tolist()
+
+  for st in ["ENTRY", "WATCH"]:
+    top = top_list(st, 10)
+    if top:
+      summary_lines.append(f"Top {st} (up to 10): {', '.join(top)}")
+
+  (out_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+  log.info(f"Wrote reports to {out_dir} (files={len(sorted(df['strategy'].unique().tolist())) + 3})")
 
 
 if __name__ == "__main__":
