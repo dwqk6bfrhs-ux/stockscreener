@@ -345,6 +345,7 @@ docker compose run --rm backtest_runner \
   --start 2024-01-01 --end 2024-12-31 \
   --book combined --reset-book \
   --tickers-source prices
+  --book combined --reset-book
 
 Outputs:
 
