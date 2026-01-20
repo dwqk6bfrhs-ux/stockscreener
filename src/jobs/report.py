@@ -335,9 +335,15 @@ def _ensure_rank_scores_table() -> None:
     updated_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (date, ticker, strategy)
   );
+
+  CREATE INDEX IF NOT EXISTS idx_rank_scores_date_strategy_score
+    ON rank_scores_daily(date, strategy, rank_score);
+
+  CREATE INDEX IF NOT EXISTS idx_rank_scores_date_strategy
+    ON rank_scores_daily(date, strategy);
   """
   with connect() as conn:
-    conn.execute(sql)
+    conn.executescript(sql)
     conn.commit()
 
 
@@ -358,6 +364,8 @@ def _upsert_rank_scores(date: str, df: pd.DataFrame) -> int:
   for i, r in df.iterrows():
     ticker = str(r.get("ticker"))
     strategy = str(r.get("strategy"))
+    if not ticker or ticker == "None" or not strategy or strategy == "None":
+      continue
     rs = rank_num.loc[i]
     rank_score = float(rs) if pd.notna(rs) else None
 
