@@ -99,3 +99,12 @@ services:
       - ./logs:/app/logs
       - ./configs:/app/configs:ro
     entrypoint: ["python", "-m", "src.jobs.finra_fetch"]
+
+  generate_orders:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+    entrypoint: ["python", "-m", "src.jobs.generate_orders"]
