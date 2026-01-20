@@ -292,6 +292,10 @@ def parse_args():
 def main():
   init_db()
   args = parse_args()
+  enable_hourly = os.environ.get("ENABLE_HOURLY", "1")
+  if str(enable_hourly).lower() in ("0", "false", "no", "off"):
+    log.info(f"Hourly fetch disabled via ENABLE_HOURLY={enable_hourly}. Skipping.")
+    return
 
   start_d, end_d, mode = resolve_mode_and_dates(args)
   log.info(f"Hourly fetch: {start_d} -> {end_d} | mode={mode} feed={args.feed} adj={args.adjustment}")
