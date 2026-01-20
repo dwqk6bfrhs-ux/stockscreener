@@ -165,7 +165,7 @@ def run_strategy_instance(
         if eq.empty:
             return {**tuning_params, "sharpe": 0.0, "cagr": 0.0, "trades": 0}
             
-        metrics = summarize(eq, bench_cols=[]) # Skip benchmarks for speed in tuning
+        metrics = summarize(eq, bench_cols=[], trades=trades) # Skip benchmarks for speed in tuning
         
         return {
             **tuning_params,

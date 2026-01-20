@@ -137,7 +137,7 @@ def main():
     regime = add_spy_regime(spy)
     eq = eq.merge(regime, on="date", how="left")
 
-    metrics = summarize(eq, bench_cols=[f"{primary}_ret", f"{secondary}_ret"])
+    metrics = summarize(eq, bench_cols=[f"{primary}_ret", f"{secondary}_ret"], trades=trades)
 
     out_dir = os.environ.get("OUTPUT_DIR", "/app/outputs")
     run_id = args.run_id or f"{cfg.get('name','strategy')}_{args.start}_{args.end}_{exec_model.entry}_{exec_model.exit}"

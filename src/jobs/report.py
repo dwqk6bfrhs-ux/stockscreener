@@ -528,6 +528,10 @@ def main():
   summary_lines.append(f"Coverage gate: daily_bars>={MIN_DAILY_BARS}, hourly_bars_today>={MIN_HOURLY_BARS_TODAY} (hourly currently optional)")
   summary_lines.append(f"Universe tickers in signals: {df['ticker'].nunique()}")
   summary_lines.append(f"Coverage OK: {int(df['coverage_ok'].sum())}/{len(df)} rows")
+  summary_lines.append(f"Coverage OK tickers: {df[df['coverage_ok']]['ticker'].nunique()}/{df['ticker'].nunique()}")
+  summary_lines.append("Signals per strategy: " + ", ".join(
+    [f"{s}={int(c)}" for s, c in df.groupby("strategy").size().sort_index().items()]
+  ))
   summary_lines.append("")
 
   for strat in sorted(df["strategy"].unique().tolist()):
