@@ -11,6 +11,7 @@ from src.common.db import init_db, connect
 from src.common.logging import setup_logger
 from src.common.timeutil import last_completed_trading_day_et
 from datetime import datetime
+from src.common.datefmt import normalize_date_str
 
 log = setup_logger("report")
 
@@ -415,7 +416,9 @@ def _upsert_rank_scores(date: str, df: pd.DataFrame) -> int:
 def main():
   init_db()
 
-  date = os.environ.get("REPORT_DATE") or last_completed_trading_day_et()
+  raw_date = os.environ.get("REPORT_DATE")
+  date = normalize_date_str(raw_date) if raw_date else last_completed_trading_day_et()
+
   out_dir = _out_dir_for_date(date)
 
   df = _read_signals(date)

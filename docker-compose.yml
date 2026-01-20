@@ -55,15 +55,6 @@ services:
       - ./logs:/app/logs
     entrypoint: ["python", "-m", "src.jobs.rank_scores"]
 
-  generate_orders:
-    build: .
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./outputs:/app/outputs
-      - ./logs:/app/logs
-    entrypoint: ["python", "-m", "src.jobs.generate_orders"]
-
   report:
     build: .
     env_file: .env
