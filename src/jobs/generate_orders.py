@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from src.common.db import init_db, connect
+from src.common.db import init_db, connect, get_prices_daily_source
 from src.common.logging import setup_logger
 from src.common.timeutil import last_completed_trading_day_et
 from src.common.ranking import build_daily_features
@@ -97,8 +97,12 @@ def _safe_json_dumps(d: Dict[str, Any]) -> str:
 
 
 def get_close(date_str: str, ticker: str) -> Optional[float]:
+  source = get_prices_daily_source()
   with connect() as conn:
-    row = conn.execute("SELECT close FROM prices_daily WHERE date=? AND ticker=?", (date_str, ticker)).fetchone()
+    row = conn.execute(
+      "SELECT close FROM prices_daily WHERE date=? AND ticker=? AND source=?",
+      (date_str, ticker, source),
+    ).fetchone()
   if not row or row[0] is None:
     return None
   try:

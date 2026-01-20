@@ -6,13 +6,20 @@ RAW_SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices_daily (
   ticker TEXT NOT NULL,
   date   TEXT NOT NULL,
+  source TEXT NOT NULL,
   open   REAL,
   high   REAL,
   low    REAL,
   close  REAL,
   volume REAL,
-  PRIMARY KEY (ticker, date)
+  PRIMARY KEY (ticker, date, source)
 );
+
+CREATE INDEX IF NOT EXISTS idx_prices_daily_date_source
+  ON prices_daily(date, source);
+
+CREATE INDEX IF NOT EXISTS idx_prices_daily_ticker_date_source
+  ON prices_daily(ticker, date, source);
 """
 
 HOURLY_SCHEMA = """
@@ -72,6 +79,10 @@ DB_SCHEMA = RAW_SCHEMA + "\n" + HOURLY_SCHEMA + "\n" + DERIVED_SCHEMA
 
 def get_db_path() -> str:
   return os.environ.get("DB_PATH", "/app/data/app.db")
+
+
+def get_prices_daily_source() -> str:
+  return os.environ.get("PRICES_DAILY_SOURCE", "alpaca")
 
 
 @contextmanager

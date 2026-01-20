@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 import yaml
 
-from src.common.db import init_db, connect
+from src.common.db import init_db, connect, get_prices_daily_source
 from src.common.logging import setup_logger
 from src.common.timeutil import last_completed_trading_day_et
 
@@ -42,25 +42,25 @@ def read_tickers_file(path: str) -> list[str]:
   return tickers
 
 
-def read_prices_tickers(start_date: str, end_date: str) -> list[str]:
+def read_prices_tickers(start_date: str, end_date: str, source: str) -> list[str]:
   with connect() as conn:
     rows = conn.execute(
-      "SELECT DISTINCT ticker FROM prices_daily WHERE date BETWEEN ? AND ? ORDER BY ticker",
-      (start_date, end_date),
+      "SELECT DISTINCT ticker FROM prices_daily WHERE source=? AND date BETWEEN ? AND ? ORDER BY ticker",
+      (source, start_date, end_date),
     ).fetchall()
   return [r[0] for r in rows]
 
 
-def read_prices_daily_window(end_date: str, lookback_days: int) -> pd.DataFrame:
+def read_prices_daily_window(end_date: str, lookback_days: int, source: str) -> pd.DataFrame:
   end = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
   start = (end - dt.timedelta(days=lookback_days)).isoformat()
   with connect() as conn:
     q = """
       SELECT ticker, date, open, high, low, close, volume
       FROM prices_daily
-      WHERE date BETWEEN ? AND ?
+      WHERE source=? AND date BETWEEN ? AND ?
     """
-    df = pd.read_sql_query(q, conn, params=(start, end_date))
+    df = pd.read_sql_query(q, conn, params=(source, start, end_date))
   if df.empty:
     return df
   df["date"] = pd.to_datetime(df["date"])
@@ -159,7 +159,8 @@ def main():
   if not strategies:
     raise RuntimeError(f"No strategies found in {config_path}")
 
-  df_daily_all = read_prices_daily_window(end_date=date_str, lookback_days=daily_lookback_days)
+  price_source = get_prices_daily_source()
+  df_daily_all = read_prices_daily_window(end_date=date_str, lookback_days=daily_lookback_days, source=price_source)
   if df_daily_all.empty:
     raise RuntimeError("No daily prices found in DB for requested window. Run eod_fetch/backfill first.")
 
@@ -171,7 +172,7 @@ def main():
     tickers = read_tickers_file(args.tickers_path)
   else:
     window_start = (dt.datetime.strptime(date_str, "%Y-%m-%d").date() - dt.timedelta(days=daily_lookback_days)).isoformat()
-    tickers = read_prices_tickers(window_start, date_str)
+    tickers = read_prices_tickers(window_start, date_str, price_source)
 
   if not tickers:
     raise RuntimeError("No tickers resolved for signal generation. Check tickers source or data availability.")
