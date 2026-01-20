@@ -82,7 +82,12 @@ def get_db_path() -> str:
 
 
 def get_prices_daily_source() -> str:
-  return os.environ.get("PRICES_DAILY_SOURCE", "alpaca")
+  return (
+    os.environ.get("PRICES_DAILY_SOURCE")
+    or os.environ.get("ALPACA_SOURCE")
+    or os.environ.get("YAHOO_SOURCE")
+    or "alpaca"
+  )
 
 
 @contextmanager
