@@ -10,7 +10,7 @@ from typing import Dict, List
 
 import pandas as pd
 
-from src.common.db import init_db, connect
+from src.common.db import init_db, connect, get_prices_daily_source
 from src.common.logging import setup_logger
 
 log = setup_logger("backtest_runner")
@@ -33,20 +33,22 @@ def _run_job(args: List[str], extra_env: Dict[str, str] | None = None) -> None:
 
 
 def _trade_dates(start: str, end: str) -> List[str]:
+  source = get_prices_daily_source()
   with connect() as conn:
     df = pd.read_sql_query(
-      "SELECT DISTINCT date FROM prices_daily WHERE date BETWEEN ? AND ? ORDER BY date",
+      "SELECT DISTINCT date FROM prices_daily WHERE source=? AND date BETWEEN ? AND ? ORDER BY date",
       conn,
-      params=(start, end),
+      params=(source, start, end),
     )
   return df["date"].astype(str).tolist()
 
 
 def _close_price(date_str: str, ticker: str) -> float | None:
+  source = get_prices_daily_source()
   with connect() as conn:
     row = conn.execute(
-      "SELECT close FROM prices_daily WHERE date=? AND ticker=?",
-      (date_str, ticker),
+      "SELECT close FROM prices_daily WHERE date=? AND ticker=? AND source=?",
+      (date_str, ticker, source),
     ).fetchone()
   if not row or row[0] is None:
     return None
@@ -212,16 +214,18 @@ def _summary(eq: pd.DataFrame, trades: pd.DataFrame, bench: pd.DataFrame) -> pd.
 def _bench_returns(dates: List[str]) -> pd.DataFrame:
   if not dates:
     return pd.DataFrame()
+  source = get_prices_daily_source()
   with connect() as conn:
     df = pd.read_sql_query(
       """
       SELECT date, ticker, close
       FROM prices_daily
-      WHERE date IN ({ph})
+      WHERE source=?
+        AND date IN ({ph})
         AND ticker IN ('SPY', 'IWM')
       """.format(ph=",".join(["?"] * len(dates))),
       conn,
-      params=dates,
+      params=[source] + dates,
     )
   if df.empty:
     return pd.DataFrame()
