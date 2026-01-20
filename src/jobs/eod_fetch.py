@@ -66,9 +66,9 @@ def _read_tickers_from_universe(universe_date: Optional[str], source: str = "alp
 
 
 
-def _latest_price_date_in_db() -> Optional[str]:
+def _latest_price_date_in_db(source: str) -> Optional[str]:
   with connect() as conn:
-    row = conn.execute("SELECT MAX(date) FROM prices_daily").fetchone()
+    row = conn.execute("SELECT MAX(date) FROM prices_daily WHERE source=?", (source,)).fetchone()
   return row[0] if row and row[0] else None
 
 
@@ -213,9 +213,9 @@ def upsert_prices(rows: list[tuple]) -> int:
     return 0
 
   sql = """
-  INSERT INTO prices_daily (ticker, date, open, high, low, close, volume)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(ticker, date) DO UPDATE SET
+  INSERT INTO prices_daily (ticker, date, source, open, high, low, close, volume)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(ticker, date, source) DO UPDATE SET
     open=excluded.open,
     high=excluded.high,
     low=excluded.low,
@@ -236,6 +236,7 @@ def fetch_bars_batch(
   feed: str,
   adjustment: str,
   page_limit: int,
+  source: str,
 ) -> int:
   """
   Fetch bars for one symbol batch and one time chunk, handling pagination.
@@ -282,6 +283,7 @@ def fetch_bars_batch(
     # Ensure symbol exists in each bar (some formats include "S"; our normalizer adds it for dict format)
     # For list format without symbol, this will fail loudly (better than silent bad DB writes).
     rows = _bars_to_rows(bars)
+    rows = [(sym, date, source, o, h, l, c, v) for sym, date, o, h, l, c, v in rows]
     n = upsert_prices(rows)
     total_rows += n
 
@@ -302,7 +304,7 @@ def resolve_date_range(args) -> tuple[date, date, str]:
 
   # If no explicit mode, choose based on DB content
   if mode == "auto":
-    latest = _latest_price_date_in_db()
+    latest = _latest_price_date_in_db(args.source)
     if latest:
       # Incremental: fetch from latest -> last trading day
       start_d = _parse_yyyy_mm_dd(latest)
@@ -372,6 +374,7 @@ def main():
   ap.add_argument("--adjustment", default=None, choices=["raw", "split", "dividend", "all"],
                   help="Corporate action adjustment (default env ALPACA_ADJUSTMENT or raw)")
   ap.add_argument("--timeframe", default="1Day", help="Alpaca timeframe string (default 1Day)")
+  ap.add_argument("--source", default=os.environ.get("ALPACA_SOURCE", "alpaca"), help="Source label stored in DB")
 
   args = ap.parse_args()
 
@@ -396,7 +399,16 @@ def main():
 
   start_d, end_d, mode_used = resolve_date_range(args)
 
-  log.info(f"Fetching EOD bars: {len(tickers)} tickers | {start_d.isoformat()} -> {end_d.isoformat()} | mode={mode_used} feed={feed} adj={adjustment}")
+  log.info(
+    "Fetching EOD bars: %s tickers | %s -> %s | mode=%s feed=%s adj=%s source=%s",
+    len(tickers),
+    start_d.isoformat(),
+    end_d.isoformat(),
+    mode_used,
+    feed,
+    adjustment,
+    args.source,
+  )
   date_chunks = _chunk_date_ranges(start_d, end_d, args.chunk_days)
 
   total_upserted = 0
@@ -416,6 +428,7 @@ def main():
           feed=feed,
           adjustment=adjustment,
           page_limit=args.page_limit,
+          source=args.source,
         )
         total_upserted += n
         if bi % 10 == 0 or bi == len(batches):

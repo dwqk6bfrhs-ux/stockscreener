@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Tuple, List
 
 import pandas as pd
 
-from src.common.db import init_db, connect
+from src.common.db import init_db, connect, get_prices_daily_source
 from src.common.logging import setup_logger
 from src.common.timeutil import last_completed_trading_day_et
 from datetime import datetime
@@ -91,7 +91,12 @@ def _sql_in_placeholders(n: int) -> str:
   return ",".join(["?"] * n)
 
 
-def _read_prices_daily_window(end_date: str, tickers: List[str], lookback_days: int = 260) -> pd.DataFrame:
+def _read_prices_daily_window(
+  end_date: str,
+  tickers: List[str],
+  lookback_days: int = 260,
+  source: Optional[str] = None,
+) -> pd.DataFrame:
   if not tickers:
     return pd.DataFrame()
 
@@ -99,18 +104,20 @@ def _read_prices_daily_window(end_date: str, tickers: List[str], lookback_days: 
   end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
   start = (end - datetime.timedelta(days=lookback_days)).isoformat()
   ph = _sql_in_placeholders(len(tickers))
+  source = source or get_prices_daily_source()
 
   with connect() as conn:
     df = pd.read_sql_query(
       f"""
       SELECT ticker, date, open, high, low, close, volume
       FROM prices_daily
-      WHERE date BETWEEN ? AND ?
+      WHERE source=?
+        AND date BETWEEN ? AND ?
         AND ticker IN ({ph})
       ORDER BY ticker, date
       """,
       conn,
-      params=[start, end_date] + tickers,
+      params=[source, start, end_date] + tickers,
     )
 
   if df.empty:

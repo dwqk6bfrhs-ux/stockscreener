@@ -4,7 +4,7 @@ import argparse
 import yaml
 import pandas as pd
 
-from src.common.db import init_db, connect
+from src.common.db import init_db, connect, get_prices_daily_source
 from src.common.logging import setup_logger
 
 from src.strategy.features import add_basic_features
@@ -17,10 +17,12 @@ from src.backtest.regimes import add_spy_regime
 log = setup_logger("backtest")
 
 def read_prices() -> pd.DataFrame:
+    source = get_prices_daily_source()
     with connect() as conn:
         return pd.read_sql_query(
-            "SELECT ticker, date, open, high, low, close, volume FROM prices_daily",
+            "SELECT ticker, date, open, high, low, close, volume FROM prices_daily WHERE source=?",
             conn,
+            params=(source,),
         )
 
 def load_cfg(path: str) -> dict:
