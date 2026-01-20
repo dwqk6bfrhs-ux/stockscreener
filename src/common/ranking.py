@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.common.db import connect
+from src.common.db import connect, get_prices_daily_source
 
 EPS = 1e-12
 
@@ -42,6 +42,7 @@ def build_daily_features(
   end_date: str,
   lookback_days: int = 260,
   tickers: Optional[list[str]] = None,
+  source: Optional[str] = None,
 ) -> pd.DataFrame:
   """
   Returns one row per ticker for end_date with:
@@ -53,7 +54,8 @@ def build_daily_features(
   start = (end - timedelta(days=lookback_days)).isoformat()
   start60 = (end - timedelta(days=60)).isoformat()
 
-  params: list[Any] = [start, end_date]
+  source = source or get_prices_daily_source()
+  params: list[Any] = [source, start, end_date]
   where_tickers = ""
   if tickers:
     where_tickers = " AND ticker IN (%s)" % ",".join(["?"] * len(tickers))
@@ -62,7 +64,7 @@ def build_daily_features(
   q = f"""
     SELECT ticker, date, open, high, low, close, volume
     FROM prices_daily
-    WHERE date BETWEEN ? AND ?
+    WHERE source=? AND date BETWEEN ? AND ?
     {where_tickers}
     ORDER BY ticker, date
   """
@@ -71,7 +73,7 @@ def build_daily_features(
     df = pd.read_sql_query(q, conn, params=params)
 
     # coverage last 60 days
-    params2: list[Any] = [start60, end_date]
+    params2: list[Any] = [source, start60, end_date]
     where_tickers2 = ""
     if tickers:
       where_tickers2 = " AND ticker IN (%s)" % ",".join(["?"] * len(tickers))
@@ -80,7 +82,7 @@ def build_daily_features(
     q2 = f"""
       SELECT ticker, COUNT(*) AS daily_bars_60
       FROM prices_daily
-      WHERE date BETWEEN ? AND ?
+      WHERE source=? AND date BETWEEN ? AND ?
       {where_tickers2}
       GROUP BY ticker
     """
