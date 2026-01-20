@@ -60,7 +60,14 @@ run_step "Hourly fetch (trade_date)" docker compose run --rm hourly_fetch \
 run_step "Generate signals" docker compose run --rm generate_signals \
   --date "$TRADE_DATE" --limit "$UNIVERSE_LIMIT"
 
-# 5) Report + Email pinned to report date
+# 5) Rank + orders pinned to report date
+run_step "Rank scores" docker compose run --rm rank_scores --date "$TRADE_DATE"
+
+run_step "Generate orders" docker compose run --rm generate_orders --date "$TRADE_DATE" \
+  --top-x 20 --max-entries 20 --overlap-bonus 0.25
+
+
+# 6) Report + Email pinned to report date
 run_step "Report" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" report
 run_step "Email"  docker compose run --rm -e REPORT_DATE="$TRADE_DATE" email
 
