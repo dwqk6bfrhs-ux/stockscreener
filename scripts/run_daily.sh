@@ -20,16 +20,26 @@ run_step () {
   echo "[$(date -Is)] <<< $name done" | tee -a "$LOG_FILE"
 }
 
-# Determine ET trade date (last completed trading day) inside container env
-# IMPORTANT: because report service has an ENTRYPOINT now, we must override it to run ad-hoc python.
-TRADE_DATE="$(
-  docker compose run --rm --entrypoint python report -c \
-    "from src.common.timeutil import last_completed_trading_day_et; print(last_completed_trading_day_et())" \
-    2>/dev/null | tr -d '\r' | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -n 1
-)"
+# If REPORT_DATE is provided (e.g. 01-16-2026), normalize it to YYYY-MM-DD and use it.
+# Otherwise, compute last completed trading day ET.
+if [[ -n "${REPORT_DATE:-}" ]]; then
+  TRADE_DATE="$(
+    docker compose run --rm --entrypoint python report -c \
+      "from datetime import datetime; s='${REPORT_DATE}'; \
+try: print(datetime.strptime(s,'%Y-%m-%d').strftime('%Y-%m-%d')); \
+except: print(datetime.strptime(s,'%m-%d-%Y').strftime('%Y-%m-%d'))" \
+      2>/dev/null | tr -d '\r' | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -n 1
+  )"
+else
+  TRADE_DATE="$(
+    docker compose run --rm --entrypoint python report -c \
+      "from src.common.timeutil import last_completed_trading_day_et; print(last_completed_trading_day_et())" \
+      2>/dev/null | tr -d '\r' | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -n 1
+  )"
+fi
 
 if [[ ! "$TRADE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-  echo "[$(date -Is)] ERROR: Failed to resolve TRADE_DATE. Got: '$TRADE_DATE'" | tee -a "$LOG_FILE"
+  echo "[$(date -Is)] ERROR: Failed to resolve TRADE_DATE. Got: '$TRADE_DATE' (REPORT_DATE='${REPORT_DATE:-}') " | tee -a "$LOG_FILE"
   exit 1
 fi
 
@@ -39,36 +49,50 @@ echo "[$(date -Is)] Trade date (ET) = $TRADE_DATE" | tee -a "$LOG_FILE"
 UNIVERSE_LIMIT="${UNIVERSE_LIMIT:-200}"
 FEED="${FEED:-sip}"
 ADJ="${ADJ:-raw}"
+ENABLE_HOURLY="${ENABLE_HOURLY:-1}"
 
-# 1) Universe snapshot pinned to trade date (replace to avoid stale leftovers)
+# Optional --limit args
+LIMIT_ARG=()
+if [[ -n "${UNIVERSE_LIMIT:-}" ]]; then
+  LIMIT_ARG=(--limit "$UNIVERSE_LIMIT")
+fi
+
+# 1) Universe snapshot pinned to trade date
 run_step "Universe fetch" docker compose run --rm universe_fetch \
-  --date "$TRADE_DATE" --limit "$UNIVERSE_LIMIT" --replace
+  --date "$TRADE_DATE" --replace \
+  "${LIMIT_ARG[@]}"
 
-# 2) Daily bars for that trade date (range mode for deterministic pinning)
+# 2) Daily bars for that trade date
 run_step "EOD fetch (trade_date)" docker compose run --rm eod_fetch \
-  --use-universe --universe-date "$TRADE_DATE" --limit "$UNIVERSE_LIMIT" \
+  --use-universe --universe-date "$TRADE_DATE" \
+  "${LIMIT_ARG[@]}" \
   --mode range --start "$TRADE_DATE" --end "$TRADE_DATE" \
   --feed "$FEED" --adjustment "$ADJ"
 
-# 3) Hourly bars for that trade date
-run_step "Hourly fetch (trade_date)" docker compose run --rm hourly_fetch \
-  --use-universe --date "$TRADE_DATE" --limit "$UNIVERSE_LIMIT" \
-  --mode range --start "$TRADE_DATE" --end "$TRADE_DATE" \
-  --feed "$FEED" --adjustment "$ADJ"
+# 3) Hourly bars for that trade date (optional)
+if [[ "$ENABLE_HOURLY" == "1" ]]; then
+  run_step "Hourly fetch (trade_date)" docker compose run --rm hourly_fetch \
+    --use-universe --date "$TRADE_DATE" \
+    "${LIMIT_ARG[@]}" \
+    --mode range --start "$TRADE_DATE" --end "$TRADE_DATE" \
+    --feed "$FEED" --adjustment "$ADJ"
+else
+  echo "[$(date -Is)] Skipping hourly fetch (ENABLE_HOURLY=$ENABLE_HOURLY)" | tee -a "$LOG_FILE"
+fi
 
-# 4) Generate signals for that trade date
+# 4) Generate signals
 run_step "Generate signals" docker compose run --rm generate_signals \
-  --date "$TRADE_DATE" --limit "$UNIVERSE_LIMIT"
+  --date "$TRADE_DATE" \
+  "${LIMIT_ARG[@]}"
 
-# 5) Rank + orders pinned to report date
-run_step "Rank scores" docker compose run --rm rank_scores --date "$TRADE_DATE"
+# 5) Report (this writes rank_scores_daily in your current setup)
+run_step "Report" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" report
 
+# 6) Generate orders (consumes rank_scores_daily)
 run_step "Generate orders" docker compose run --rm generate_orders --date "$TRADE_DATE" \
   --top-x 20 --max-entries 20 --overlap-bonus 0.25
 
-
-# 6) Report + Email pinned to report date
-run_step "Report" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" report
-run_step "Email"  docker compose run --rm -e REPORT_DATE="$TRADE_DATE" email
+# 7) Email
+run_step "Email" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" email
 
 echo "[$(date -Is)] Daily run completed successfully." | tee -a "$LOG_FILE"
