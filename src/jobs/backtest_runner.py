@@ -226,12 +226,14 @@ def _bench_returns(dates: List[str]) -> pd.DataFrame:
   if df.empty:
     return pd.DataFrame()
   df["date"] = pd.to_datetime(df["date"])
-  out = {"date": [d.date().isoformat() for d in sorted(df["date"].unique())]}
+  date_index = pd.to_datetime(pd.Series(dates))
+  out = {"date": [d.date().isoformat() for d in date_index]}
   for t in ["SPY", "IWM"]:
     g = df[df["ticker"] == t].sort_values("date")
     if g.empty:
       continue
-    ret = g["close"].pct_change().fillna(0.0)
+    ret = g.set_index("date")["close"].pct_change().fillna(0.0)
+    ret = ret.reindex(date_index, fill_value=0.0)
     out[t] = (1.0 + ret).cumprod() - 1.0
   return pd.DataFrame(out)
 
