@@ -38,6 +38,12 @@ services:
     volumes: *vol_with_tickers
     entrypoint: ["python", "-m", "src.jobs.hourly_fetch"]
 
+  yahoo_fetch:
+    build: .
+    env_file: .env
+    volumes: *vol_with_tickers
+    entrypoint: ["python", "-m", "src.jobs.yahoo_fetch"]
+
   generate_signals:
     build: .
     env_file: .env

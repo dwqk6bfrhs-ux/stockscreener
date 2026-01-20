@@ -125,6 +125,8 @@ eod_fetch
 
 hourly_fetch
 
+yahoo_fetch
+
 generate_signals
 
 report
@@ -327,12 +329,22 @@ docker compose run --rm eod_fetch \
   --mode range --start 2024-01-01 --end 2026-01-16 \
   --feed sip --adjustment raw
 
+Yahoo Finance backfill (for backtesting)
+
+If you want to backtest without Alpaca universe data, you can backfill daily bars from Yahoo:
+
+docker compose run --rm yahoo_fetch \
+  --start 2024-01-01 --end 2024-12-31 \
+  --tickers-path /app/tickers.txt --limit 200
+
 Backtest runner (deterministic replay)
 
 The backtest runner replays daily signals -> report -> orders, then simulates fills at close:
 
 docker compose run --rm backtest_runner \
   --start 2024-01-01 --end 2024-12-31 \
+  --book combined --reset-book \
+  --tickers-source prices
   --book combined --reset-book
 
 Outputs:

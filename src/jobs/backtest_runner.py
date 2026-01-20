@@ -244,6 +244,13 @@ def main() -> None:
   ap.add_argument("--run-id", default=None)
   ap.add_argument("--initial-cash", type=float, default=100000.0)
   ap.add_argument("--reset-book", action="store_true", help="Clear orders/positions for this book before running.")
+  ap.add_argument(
+    "--tickers-source",
+    choices=["universe", "tickers", "prices"],
+    default="universe",
+    help="Ticker source for signal generation (default: universe).",
+  )
+  ap.add_argument("--tickers-path", default=os.environ.get("TICKERS_PATH", "/app/tickers.txt"))
 
   ap.add_argument("--top-x", type=int, default=20)
   ap.add_argument("--max-entries", type=int, default=20)
@@ -260,7 +267,12 @@ def main() -> None:
     _reset_book(args.book, dates[0], dates[-1])
 
   for d in dates:
-    _run_job(["python", "-m", "src.jobs.generate_signals", "--date", d])
+    _run_job([
+      "python", "-m", "src.jobs.generate_signals",
+      "--date", d,
+      "--tickers-source", args.tickers_source,
+      "--tickers-path", args.tickers_path,
+    ])
     _run_job(["python", "-m", "src.jobs.report"], extra_env={"REPORT_DATE": d})
     _run_job([
       "python", "-m", "src.jobs.generate_orders",

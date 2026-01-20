@@ -31,6 +31,26 @@ def read_universe(date_str: str, source: str) -> list[str]:
   return [r[0] for r in rows]
 
 
+def read_tickers_file(path: str) -> list[str]:
+  tickers = []
+  with open(path, "r", encoding="utf-8") as f:
+    for line in f:
+      t = line.strip()
+      if not t or t.startswith("#"):
+        continue
+      tickers.append(t.upper())
+  return tickers
+
+
+def read_prices_tickers(start_date: str, end_date: str) -> list[str]:
+  with connect() as conn:
+    rows = conn.execute(
+      "SELECT DISTINCT ticker FROM prices_daily WHERE date BETWEEN ? AND ? ORDER BY ticker",
+      (start_date, end_date),
+    ).fetchall()
+  return [r[0] for r in rows]
+
+
 def read_prices_daily_window(end_date: str, lookback_days: int) -> pd.DataFrame:
   end = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
   start = (end - dt.timedelta(days=lookback_days)).isoformat()
@@ -111,6 +131,17 @@ def main():
   ap.add_argument("--config", default=None, help="Strategies YAML path (default env STRATEGIES_CONFIG)")
   ap.add_argument("--limit", type=int, default=None, help="Limit tickers for testing")
   ap.add_argument("--only", action="append", default=None, help="Run only these strategy names (repeatable)")
+  ap.add_argument(
+    "--tickers-source",
+    choices=["universe", "tickers", "prices"],
+    default=os.environ.get("SIGNALS_TICKERS_SOURCE", "universe"),
+    help="Where to source tickers: universe | tickers | prices (default: universe)",
+  )
+  ap.add_argument(
+    "--tickers-path",
+    default=os.environ.get("TICKERS_PATH", "/app/tickers.txt"),
+    help="Path to tickers.txt (used when tickers-source=tickers)",
+  )
   args = ap.parse_args()
 
   date_str = args.date or last_completed_trading_day_et()
@@ -128,15 +159,25 @@ def main():
   if not strategies:
     raise RuntimeError(f"No strategies found in {config_path}")
 
-  tickers = read_universe(date_str, universe_source)
-  if not tickers:
-    raise RuntimeError(f"No universe tickers for date={date_str} source={universe_source}. Run universe_fetch first.")
-  if args.limit:
-    tickers = tickers[:args.limit]
-
   df_daily_all = read_prices_daily_window(end_date=date_str, lookback_days=daily_lookback_days)
   if df_daily_all.empty:
     raise RuntimeError("No daily prices found in DB for requested window. Run eod_fetch/backfill first.")
+
+  if args.tickers_source == "universe":
+    tickers = read_universe(date_str, universe_source)
+    if not tickers:
+      raise RuntimeError(f"No universe tickers for date={date_str} source={universe_source}. Run universe_fetch first.")
+  elif args.tickers_source == "tickers":
+    tickers = read_tickers_file(args.tickers_path)
+  else:
+    window_start = (dt.datetime.strptime(date_str, "%Y-%m-%d").date() - dt.timedelta(days=daily_lookback_days)).isoformat()
+    tickers = read_prices_tickers(window_start, date_str)
+
+  if not tickers:
+    raise RuntimeError("No tickers resolved for signal generation. Check tickers source or data availability.")
+  if args.limit:
+    tickers = tickers[:args.limit]
+
   df_daily_all = df_daily_all[df_daily_all["ticker"].isin(tickers)].copy()
 
   df_hourly_all = read_prices_hourly_window(end_date_et=date_str, lookback_days=hourly_lookback_days)
