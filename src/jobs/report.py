@@ -10,6 +10,7 @@ import pandas as pd
 from src.common.db import init_db, connect
 from src.common.logging import setup_logger
 from src.common.timeutil import last_completed_trading_day_et
+from datetime import datetime
 
 log = setup_logger("report")
 
@@ -320,6 +321,88 @@ def _rank_ma_cross(row: pd.Series) -> Tuple[Optional[float], str]:
   reason = f"daily_stack={td:.2f} hourly_stack={th:.2f} liq={liq:.2f}"
   return float(score), reason
 
+def _ensure_rank_scores_table() -> None:
+  """
+  Persist report ranking so other jobs (orders/backtest/LLM) can reuse it.
+  """
+  sql = """
+  CREATE TABLE IF NOT EXISTS rank_scores_daily (
+    date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    rank_score REAL,
+    meta_json TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (date, ticker, strategy)
+  );
+  """
+  with connect() as conn:
+    conn.execute(sql)
+    conn.commit()
+
+
+def _upsert_rank_scores(date: str, df: pd.DataFrame) -> int:
+  """
+  Write rank_score + key debug fields to rank_scores_daily.
+  Uses an UPSERT so reruns are safe (no dup rows).
+  """
+  if df.empty:
+    return 0
+
+  now = datetime.utcnow().isoformat()
+  rows = []
+
+  # Ensure we have numeric rank_score
+  rank_num = pd.to_numeric(df.get("rank_score"), errors="coerce")
+
+  for i, r in df.iterrows():
+    ticker = str(r.get("ticker"))
+    strategy = str(r.get("strategy"))
+    rs = rank_num.loc[i]
+    rank_score = float(rs) if pd.notna(rs) else None
+
+    meta = {
+      "rank_reason": r.get("rank_reason"),
+      "state": r.get("state"),
+      "raw_state": r.get("raw_state"),
+      "coverage": {
+        "coverage_ok": bool(r.get("coverage_ok")) if r.get("coverage_ok") is not None else None,
+        "coverage_daily_ok": bool(r.get("coverage_daily_ok")) if r.get("coverage_daily_ok") is not None else None,
+        "coverage_hourly_ok": bool(r.get("coverage_hourly_ok")) if r.get("coverage_hourly_ok") is not None else None,
+        "daily_bars": int(r.get("daily_bars")) if pd.notna(r.get("daily_bars")) else None,
+        "hourly_bars_today": int(r.get("hourly_bars_today")) if pd.notna(r.get("hourly_bars_today")) else None,
+      },
+      # helpful context for execution/LLM later; small + stable
+      "features": {
+        "close": float(r.get("close")) if pd.notna(r.get("close")) else None,
+        "dv20": float(r.get("dv20")) if pd.notna(r.get("dv20")) else None,
+        "atr_pct": float(r.get("atr_pct")) if pd.notna(r.get("atr_pct")) else None,
+      },
+    }
+
+    rows.append((
+      date,
+      ticker,
+      strategy,
+      rank_score,
+      json.dumps(meta, ensure_ascii=False),
+      now,
+    ))
+
+  sql = """
+  INSERT INTO rank_scores_daily (date, ticker, strategy, rank_score, meta_json, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(date, ticker, strategy) DO UPDATE SET
+    rank_score=excluded.rank_score,
+    meta_json=excluded.meta_json,
+    updated_at=excluded.updated_at
+  """
+
+  with connect() as conn:
+    conn.executemany(sql, rows)
+    conn.commit()
+
+  return len(rows)
 
 def main():
   init_db()
@@ -397,6 +480,12 @@ def main():
     d = d.sort_values(["state", "sort_score"], ascending=[True, False])
     out_csv = out_dir / f"signals_{strat}.csv"
     d.to_csv(out_csv, index=False)
+
+  # Persist rank scores into DB for reuse (orders/backtest/LLM)
+  _ensure_rank_scores_table()
+  n_rank = _upsert_rank_scores(date, df)
+  log.info(f"Upserted rank_scores_daily: date={date} rows={n_rank}")
+
 
   # Build action/watch lists for email
   # Keep email stable: must produce action_list.csv and watch_list.csv
