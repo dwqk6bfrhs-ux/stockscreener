@@ -73,6 +73,12 @@ services:
     volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.backtest"]
 
+  backtest_runner:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.backtest_runner"]
+
   fred_fetch:
     build: .
     env_file: .env

@@ -131,6 +131,8 @@ report
 
 email
 
+(backtest_runner)
+
 (optional) backtest, fred_fetch, finra_fetch
 
 Example pattern:
@@ -148,11 +150,16 @@ Resolves TRADE_DATE in America/New_York time.
 Runs all jobs with REPORT_DATE pinned to that same date.
 
 Uses consistent feed + adjustment for both daily & hourly pulls.
+Honors ENABLE_HOURLY=0 to skip hourly fetches on full-universe runs.
 
 Typical run:
 
 chmod +x scripts/run_daily.sh
 ./scripts/run_daily.sh
+
+To skip hourly bars for full-universe runs:
+
+ENABLE_HOURLY=0 ./scripts/run_daily.sh
 
 Important: trade date correctness (holidays)
 
@@ -319,6 +326,21 @@ docker compose run --rm eod_fetch \
   --use-universe --limit 200 \
   --mode range --start 2024-01-01 --end 2026-01-16 \
   --feed sip --adjustment raw
+
+Backtest runner (deterministic replay)
+
+The backtest runner replays daily signals -> report -> orders, then simulates fills at close:
+
+docker compose run --rm backtest_runner \
+  --start 2024-01-01 --end 2024-12-31 \
+  --book combined --reset-book
+
+Outputs:
+
+outputs/backtests/<run_id>/
+  backtest_equity.csv
+  backtest_summary.csv
+  backtest_trades.csv
 
 
 If you plan to “always backfill when data is not enough,” implement a simple check:
