@@ -168,9 +168,8 @@ Important: trade date correctness (holidays)
 Your “last completed trading day” must be holiday-aware.
 If your helper function only skips weekends, it will incorrectly treat holidays as trade dates and can lead to failed data pulls (or empty/incomplete data).
 
-Recommended approach:
-
-Implement last_completed_trading_day_et() using Alpaca market calendar (holiday-aware), and only return “today” after market close + a grace window.
+Current status:
+- last_completed_trading_day_et() is implemented using the Alpaca market calendar when available (holiday-aware), with a weekend-only fallback, and a cutoff hour buffer.
 
 Universe snapshots
 What is universe_daily?
@@ -296,7 +295,7 @@ Compute rank features (trend/liquidity/risk, etc.)
 
 Output action_list.csv, watch_list.csv, summary.txt
 
-Coverage gating (recommended)
+Coverage gating (implemented)
 
 Example policy:
 
@@ -307,6 +306,10 @@ Require ≥ N bars of history for the strategy’s indicators (e.g., at least 60
 For hourly features, require ≥ N hourly bars for the day (e.g., ≥ 4)
 
 This prevents false rankings on symbols with insufficient or missing data.
+
+Current status:
+- Coverage gating is enforced in report (daily bars required; hourly currently optional).
+- Rank scores are persisted to rank_scores_daily for reuse by orders/backtest/LLM workflows.
 
 Backfilling
 
@@ -362,31 +365,31 @@ Roadmap (next milestones)
 
 Stabilize trade date + canonical data config
 
-Holiday-aware trade date function
+Holiday-aware trade date function (implemented with Alpaca calendar + fallback)
 
 Consistent feed/adjustment across daily/hourly
 
 Ranking feature engineering (report-side first)
 
-Coverage gating
+Coverage gating (implemented; hourly optional)
 
-Strategy-specific rank columns (trend/liquidity/risk)
+Strategy-specific rank columns (trend/liquidity/risk) (implemented for ma_cross + retest_shrink)
 
 Output top-N per strategy and combined
 
 Strategy meta improvements (without changing logic)
 
-Keep D0/retest/confirm logic fixed
+Keep D0/retest/confirm logic fixed (implemented)
 
-Expand meta and scoring only
+Expand meta and scoring only (implemented for ma_cross + retest_shrink)
 
-Ensure adapter normalization remains stable
+Ensure adapter normalization remains stable (implemented)
 
 Hourly-informed ranking
 
-Add intraday features for MA strategies
+Add intraday features for MA strategies (implemented in report + ma_cross)
 
-Improve scoring/ranking for MA cross + retest shrink
+Improve scoring/ranking for MA cross + retest shrink (implemented, ongoing tuning)
 
 LLM-ready datasets
 
