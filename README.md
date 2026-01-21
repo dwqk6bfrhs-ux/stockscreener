@@ -358,6 +358,24 @@ docker compose run --rm backtest_runner \
   --book combined --reset-book \
   --tickers-source prices
 
+For strict no-lookahead signals (use data up to prior trading day), add:
+
+  --no-lookahead
+
+To keep universe snapshots aligned with each trade date, fetch universe_daily
+for every trading day in your range (slower but most correct). One option:
+
+  sqlite3 data/app.db \
+    "SELECT DISTINCT date FROM prices_daily WHERE source='alpaca' AND date BETWEEN '2024-01-01' AND '2024-12-31' ORDER BY date;" \
+  | while read -r d; do
+      docker compose run --rm universe_fetch --date "$d" --replace
+    done
+
+To limit the scan to more liquid names, pass liquidity filters down to signals:
+
+  --min-avg-volume 2000000
+  --min-adv20-dollars 20000000
+
 Outputs:
 
 outputs/backtests/<run_id>/

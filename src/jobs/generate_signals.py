@@ -67,6 +67,17 @@ def read_prices_daily_window(end_date: str, lookback_days: int, source: str) -> 
   return df
 
 
+def previous_trading_date(date_str: str, source: str) -> str:
+  with connect() as conn:
+    row = conn.execute(
+      "SELECT MAX(date) FROM prices_daily WHERE source=? AND date < ?",
+      (source, date_str),
+    ).fetchone()
+  if not row or row[0] is None:
+    raise RuntimeError(f"No prior trading date found before {date_str} for source={source}.")
+  return str(row[0])
+
+
 def read_prices_hourly_window(end_date_et: str, lookback_days: int) -> pd.DataFrame:
   """
   Reads hourly bars by ET date bucket: prices_hourly(date_et).
@@ -85,6 +96,48 @@ def read_prices_hourly_window(end_date_et: str, lookback_days: int) -> pd.DataFr
     return df
   df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
   return df
+
+
+def _liquidity_filter(
+  df_daily: pd.DataFrame,
+  min_avg_volume: Optional[float],
+  min_adv20_dollars: Optional[float],
+) -> list[str]:
+  if df_daily.empty:
+    return []
+
+  vol_floor = float(min_avg_volume) if min_avg_volume is not None else None
+  dv20_floor = float(min_adv20_dollars) if min_adv20_dollars is not None else None
+  if vol_floor is None and dv20_floor is None:
+    return sorted(df_daily["ticker"].unique().tolist())
+
+  df = df_daily.copy()
+  df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+  df["close"] = pd.to_numeric(df["close"], errors="coerce")
+  df["dollar_vol"] = df["close"].abs() * df["volume"].abs()
+
+  grouped = df.sort_values("date").groupby("ticker", sort=False)
+  rows = []
+  for ticker, g in grouped:
+    g_tail = g.tail(20)
+    if len(g_tail) < 20:
+      avg_vol = None
+      avg_dv = None
+    else:
+      avg_vol = g_tail["volume"].mean()
+      avg_dv = g_tail["dollar_vol"].mean()
+    rows.append({"ticker": ticker, "avg_vol": avg_vol, "avg_dv": avg_dv})
+
+  df_liq = pd.DataFrame(rows)
+  if df_liq.empty:
+    return []
+
+  mask = pd.Series(True, index=df_liq.index)
+  if vol_floor is not None:
+    mask &= df_liq["avg_vol"].fillna(0.0) >= vol_floor
+  if dv20_floor is not None:
+    mask &= df_liq["avg_dv"].fillna(0.0) >= dv20_floor
+  return df_liq.loc[mask, "ticker"].astype(str).tolist()
 
 
 def upsert_signals(rows: list[tuple]) -> int:
@@ -142,6 +195,23 @@ def main():
     default=os.environ.get("TICKERS_PATH", "/app/tickers.txt"),
     help="Path to tickers.txt (used when tickers-source=tickers)",
   )
+  ap.add_argument(
+    "--no-lookahead",
+    action="store_true",
+    help="Compute signals using data up to the prior trading day (no same-day lookahead).",
+  )
+  ap.add_argument(
+    "--min-avg-volume",
+    type=float,
+    default=None,
+    help="Minimum 20-day average share volume required to keep a ticker.",
+  )
+  ap.add_argument(
+    "--min-adv20-dollars",
+    type=float,
+    default=None,
+    help="Minimum 20-day average dollar volume (close*volume) required to keep a ticker.",
+  )
   args = ap.parse_args()
 
   date_str = args.date or last_completed_trading_day_et()
@@ -160,19 +230,22 @@ def main():
     raise RuntimeError(f"No strategies found in {config_path}")
 
   price_source = get_prices_daily_source()
-  df_daily_all = read_prices_daily_window(end_date=date_str, lookback_days=daily_lookback_days, source=price_source)
+  data_end_date = previous_trading_date(date_str, price_source) if args.no_lookahead else date_str
+  df_daily_all = read_prices_daily_window(end_date=data_end_date, lookback_days=daily_lookback_days, source=price_source)
   if df_daily_all.empty:
     raise RuntimeError("No daily prices found in DB for requested window. Run eod_fetch/backfill first.")
 
   if args.tickers_source == "universe":
     tickers = read_universe(date_str, universe_source)
     if not tickers:
-      raise RuntimeError(f"No universe tickers for date={date_str} source={universe_source}. Run universe_fetch first.")
+      raise RuntimeError(
+        f"No universe tickers for date={date_str} source={universe_source}. Run universe_fetch first."
+      )
   elif args.tickers_source == "tickers":
     tickers = read_tickers_file(args.tickers_path)
   else:
-    window_start = (dt.datetime.strptime(date_str, "%Y-%m-%d").date() - dt.timedelta(days=daily_lookback_days)).isoformat()
-    tickers = read_prices_tickers(window_start, date_str, price_source)
+    window_start = (dt.datetime.strptime(data_end_date, "%Y-%m-%d").date() - dt.timedelta(days=daily_lookback_days)).isoformat()
+    tickers = read_prices_tickers(window_start, data_end_date, price_source)
 
   if not tickers:
     raise RuntimeError("No tickers resolved for signal generation. Check tickers source or data availability.")
@@ -180,8 +253,18 @@ def main():
     tickers = tickers[:args.limit]
 
   df_daily_all = df_daily_all[df_daily_all["ticker"].isin(tickers)].copy()
+  if args.min_avg_volume is not None or args.min_adv20_dollars is not None:
+    allowed = set(_liquidity_filter(
+      df_daily_all,
+      min_avg_volume=args.min_avg_volume,
+      min_adv20_dollars=args.min_adv20_dollars,
+    ))
+    tickers = [t for t in tickers if t in allowed]
+    df_daily_all = df_daily_all[df_daily_all["ticker"].isin(tickers)].copy()
+    if not tickers:
+      raise RuntimeError("No tickers left after applying liquidity filters.")
 
-  df_hourly_all = read_prices_hourly_window(end_date_et=date_str, lookback_days=hourly_lookback_days)
+  df_hourly_all = read_prices_hourly_window(end_date_et=data_end_date, lookback_days=hourly_lookback_days)
   if not df_hourly_all.empty:
     df_hourly_all = df_hourly_all[df_hourly_all["ticker"].isin(tickers)].copy()
 

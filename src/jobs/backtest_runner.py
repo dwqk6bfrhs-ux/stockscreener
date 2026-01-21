@@ -262,6 +262,23 @@ def main() -> None:
   ap.add_argument("--max-entries", type=int, default=20)
   ap.add_argument("--overlap-bonus", type=float, default=0.25)
   ap.add_argument("--require-overlap", action="store_true")
+  ap.add_argument(
+    "--no-lookahead",
+    action="store_true",
+    help="Compute signals using data up to the prior trading day (no same-day lookahead).",
+  )
+  ap.add_argument(
+    "--min-avg-volume",
+    type=float,
+    default=None,
+    help="Minimum 20-day average share volume required to keep a ticker.",
+  )
+  ap.add_argument(
+    "--min-adv20-dollars",
+    type=float,
+    default=None,
+    help="Minimum 20-day average dollar volume (close*volume) required to keep a ticker.",
+  )
   args = ap.parse_args()
 
   init_db()
@@ -278,7 +295,9 @@ def main() -> None:
       "--date", d,
       "--tickers-source", args.tickers_source,
       "--tickers-path", args.tickers_path,
-    ])
+    ] + (["--no-lookahead"] if args.no_lookahead else [])
+    + (["--min-avg-volume", str(args.min_avg_volume)] if args.min_avg_volume is not None else [])
+    + (["--min-adv20-dollars", str(args.min_adv20_dollars)] if args.min_adv20_dollars is not None else []))
     _run_job(["python", "-m", "src.jobs.report"], extra_env={"REPORT_DATE": d})
     _run_job([
       "python", "-m", "src.jobs.generate_orders",
