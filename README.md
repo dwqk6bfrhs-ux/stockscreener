@@ -61,6 +61,7 @@ src/
     generate_signals.py
     report.py
     send_email.py
+    export_dossier.py
   strategy/
     ma_cross.py
     retest_shrink.py
@@ -131,6 +132,8 @@ generate_signals
 
 report
 
+export_dossier
+
 email
 
 (backtest_runner)
@@ -163,14 +166,19 @@ To skip hourly bars for full-universe runs:
 
 ENABLE_HOURLY=0 ./scripts/run_daily.sh
 
+Dossier export (LLM-ready JSONL)
+
+Generate a per-ticker dossier after running report:
+
+docker compose run --rm export_dossier --date 2026-01-16
+
 Important: trade date correctness (holidays)
 
 Your “last completed trading day” must be holiday-aware.
 If your helper function only skips weekends, it will incorrectly treat holidays as trade dates and can lead to failed data pulls (or empty/incomplete data).
 
-Recommended approach:
-
-Implement last_completed_trading_day_et() using Alpaca market calendar (holiday-aware), and only return “today” after market close + a grace window.
+Current status:
+- last_completed_trading_day_et() is implemented using the Alpaca market calendar when available (holiday-aware), with a weekend-only fallback, and a cutoff hour buffer.
 
 Universe snapshots
 What is universe_daily?
@@ -296,7 +304,7 @@ Compute rank features (trend/liquidity/risk, etc.)
 
 Output action_list.csv, watch_list.csv, summary.txt
 
-Coverage gating (recommended)
+Coverage gating (implemented)
 
 Example policy:
 
@@ -307,6 +315,10 @@ Require ≥ N bars of history for the strategy’s indicators (e.g., at least 60
 For hourly features, require ≥ N hourly bars for the day (e.g., ≥ 4)
 
 This prevents false rankings on symbols with insufficient or missing data.
+
+Current status:
+- Coverage gating is enforced in report (daily bars required; hourly currently optional).
+- Rank scores are persisted to rank_scores_daily for reuse by orders/backtest/LLM workflows.
 
 Backfilling
 
@@ -362,37 +374,47 @@ Roadmap (next milestones)
 
 Stabilize trade date + canonical data config
 
-Holiday-aware trade date function
+Holiday-aware trade date function (implemented with Alpaca calendar + fallback)
 
 Consistent feed/adjustment across daily/hourly
 
 Ranking feature engineering (report-side first)
 
-Coverage gating
+Coverage gating (implemented; hourly optional)
 
-Strategy-specific rank columns (trend/liquidity/risk)
+Strategy-specific rank columns (trend/liquidity/risk) (implemented for ma_cross + retest_shrink)
 
 Output top-N per strategy and combined
 
 Strategy meta improvements (without changing logic)
 
-Keep D0/retest/confirm logic fixed
+Keep D0/retest/confirm logic fixed (implemented)
 
-Expand meta and scoring only
+Expand meta and scoring only (implemented for ma_cross + retest_shrink)
 
-Ensure adapter normalization remains stable
+Ensure adapter normalization remains stable (implemented)
 
 Hourly-informed ranking
 
-Add intraday features for MA strategies
+Add intraday features for MA strategies (implemented in report + ma_cross)
 
-Improve scoring/ranking for MA cross + retest shrink
+Improve scoring/ranking for MA cross + retest shrink (implemented, ongoing tuning)
 
 LLM-ready datasets
 
 Build a compact “ticker dossier” payload (signals + rank features + key windows)
 
 Store in DB or export JSON for RAG later
+
+Current status:
+- export_dossier job writes a per-ticker JSONL dossier to outputs/<REPORT_DATE>/dossier.jsonl by combining signals, rank scores, daily features, hourly coverage, and the daily OHLCV snapshot.
+Schema (per line):
+- date, ticker
+- signals: list of {strategy, state, score, stop, raw_state, features, meta}
+- rank_scores: list of {strategy, rank_score, meta}
+- daily_features: output of build_daily_features (close, ma5/10/20/50/200, atr14, atr_pct, dollar_vol_20, daily_bars_60)
+- hourly_coverage: {hourly_bars}
+- daily_snapshot: {open, high, low, close, volume}
 
 Scaling for full-market scans
 

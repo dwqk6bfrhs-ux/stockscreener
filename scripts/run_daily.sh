@@ -88,11 +88,14 @@ run_step "Generate signals" docker compose run --rm generate_signals \
 # 5) Report (this writes rank_scores_daily in your current setup)
 run_step "Report" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" report
 
-# 6) Generate orders (consumes rank_scores_daily)
+# 6) Export dossier (LLM-ready JSONL)
+run_step "Export dossier" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" export_dossier
+
+# 7) Generate orders (consumes rank_scores_daily)
 run_step "Generate orders" docker compose run --rm generate_orders --date "$TRADE_DATE" \
   --top-x 20 --max-entries 20 --overlap-bonus 0.25
 
-# 7) Email
+# 8) Email
 run_step "Email" docker compose run --rm -e REPORT_DATE="$TRADE_DATE" email
 
 echo "[$(date -Is)] Daily run completed successfully." | tee -a "$LOG_FILE"
