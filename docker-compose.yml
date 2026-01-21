@@ -67,6 +67,12 @@ services:
     volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.report"]
 
+  export_dossier:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.export_dossier"]
+
   email:
     build: .
     env_file: .env

@@ -58,10 +58,10 @@ src/
     universe_fetch.py
     eod_fetch.py
     hourly_fetch.py
-  generate_signals.py
-  report.py
-  send_email.py
-  export_dossier.py
+    generate_signals.py
+    report.py
+    send_email.py
+    export_dossier.py
   strategy/
     ma_cross.py
     retest_shrink.py
@@ -132,6 +132,8 @@ generate_signals
 
 report
 
+export_dossier
+
 email
 
 (backtest_runner)
@@ -163,6 +165,12 @@ chmod +x scripts/run_daily.sh
 To skip hourly bars for full-universe runs:
 
 ENABLE_HOURLY=0 ./scripts/run_daily.sh
+
+Dossier export (LLM-ready JSONL)
+
+Generate a per-ticker dossier after running report:
+
+docker compose run --rm export_dossier --date 2026-01-16
 
 Important: trade date correctness (holidays)
 
@@ -400,6 +408,13 @@ Store in DB or export JSON for RAG later
 
 Current status:
 - export_dossier job writes a per-ticker JSONL dossier to outputs/<REPORT_DATE>/dossier.jsonl by combining signals, rank scores, daily features, hourly coverage, and the daily OHLCV snapshot.
+Schema (per line):
+- date, ticker
+- signals: list of {strategy, state, score, stop, raw_state, features, meta}
+- rank_scores: list of {strategy, rank_score, meta}
+- daily_features: output of build_daily_features (close, ma5/10/20/50/200, atr14, atr_pct, dollar_vol_20, daily_bars_60)
+- hourly_coverage: {hourly_bars}
+- daily_snapshot: {open, high, low, close, volume}
 
 Scaling for full-market scans
 
