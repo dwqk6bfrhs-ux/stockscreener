@@ -58,9 +58,10 @@ src/
     universe_fetch.py
     eod_fetch.py
     hourly_fetch.py
-    generate_signals.py
-    report.py
-    send_email.py
+  generate_signals.py
+  report.py
+  send_email.py
+  export_dossier.py
   strategy/
     ma_cross.py
     retest_shrink.py
@@ -396,6 +397,9 @@ LLM-ready datasets
 Build a compact “ticker dossier” payload (signals + rank features + key windows)
 
 Store in DB or export JSON for RAG later
+
+Current status:
+- export_dossier job writes a per-ticker JSONL dossier to outputs/<REPORT_DATE>/dossier.jsonl by combining signals, rank scores, daily features, hourly coverage, and the daily OHLCV snapshot.
 
 Scaling for full-market scans
 
