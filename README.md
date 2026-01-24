@@ -383,6 +383,39 @@ outputs/backtests/<run_id>/
   backtest_summary.csv
   backtest_trades.csv
 
+Stage 1: Edge report (signal quality)
+
+Generate forward-return diagnostics by score decile, MAE/MFE, regime splits,
+and calibration curves:
+
+docker compose run --rm stage1_edge_report \
+  --start 2024-01-01 --end 2024-12-31 \
+  --horizons 5,10,20
+
+Outputs:
+
+outputs/stage1_edge/<run_id>/
+  signals_with_forwards.csv
+  decile_report_5d.csv
+  regime_report_5d.csv
+  calibration_5d.csv
+
+Stage 2: Portfolio simulator (cash + slots)
+
+Simulate realizable returns with cash/slot constraints and a deterministic
+selection policy (rank_score, then liquidity):
+
+docker compose run --rm portfolio_sim \
+  --start 2024-01-01 --end 2024-12-31 \
+  --max-positions 20 --min-ticket-pct 0.05 \
+  --hold-days 5 --entry-exec close --exit-exec close
+
+Outputs:
+
+outputs/stage2_portfolio/<run_id>/
+  equity_curve.csv
+  trades.csv
+
 
 If you plan to “always backfill when data is not enough,” implement a simple check:
 

@@ -91,6 +91,18 @@ services:
     volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.backtest_runner"]
 
+  stage1_edge_report:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.stage1_edge_report"]
+
+  portfolio_sim:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.portfolio_sim"]
+
   fred_fetch:
     build: .
     env_file: .env
