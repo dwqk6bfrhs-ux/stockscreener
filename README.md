@@ -358,12 +358,63 @@ docker compose run --rm backtest_runner \
   --book combined --reset-book \
   --tickers-source prices
 
+For strict no-lookahead signals (use data up to prior trading day), add:
+
+  --no-lookahead
+
+To keep universe snapshots aligned with each trade date, fetch universe_daily
+for every trading day in your range (slower but most correct). One option:
+
+  sqlite3 data/app.db \
+    "SELECT DISTINCT date FROM prices_daily WHERE source='alpaca' AND date BETWEEN '2024-01-01' AND '2024-12-31' ORDER BY date;" \
+  | while read -r d; do
+      docker compose run --rm universe_fetch --date "$d" --replace
+    done
+
+To limit the scan to more liquid names, pass liquidity filters down to signals:
+
+  --min-avg-volume 2000000
+  --min-adv20-dollars 20000000
+
 Outputs:
 
 outputs/backtests/<run_id>/
   backtest_equity.csv
   backtest_summary.csv
   backtest_trades.csv
+
+Stage 1: Edge report (signal quality)
+
+Generate forward-return diagnostics by score decile, MAE/MFE, regime splits,
+and calibration curves:
+
+docker compose run --rm stage1_edge_report \
+  --start 2024-01-01 --end 2024-12-31 \
+  --horizons 5,10,20
+
+Outputs:
+
+outputs/stage1_edge/<run_id>/
+  signals_with_forwards.csv
+  decile_report_5d.csv
+  regime_report_5d.csv
+  calibration_5d.csv
+
+Stage 2: Portfolio simulator (cash + slots)
+
+Simulate realizable returns with cash/slot constraints and a deterministic
+selection policy (rank_score, then liquidity):
+
+docker compose run --rm portfolio_sim \
+  --start 2024-01-01 --end 2024-12-31 \
+  --max-positions 20 --min-ticket-pct 0.05 \
+  --hold-days 5 --entry-exec close --exit-exec close
+
+Outputs:
+
+outputs/stage2_portfolio/<run_id>/
+  equity_curve.csv
+  trades.csv
 
 
 If you plan to “always backfill when data is not enough,” implement a simple check:
