@@ -61,6 +61,7 @@ src/
     generate_signals.py
     report.py
     send_email.py
+    export_dossier.py
   strategy/
     ma_cross.py
     retest_shrink.py
@@ -125,11 +126,17 @@ eod_fetch
 
 hourly_fetch
 
+yahoo_fetch
+
 generate_signals
 
 report
 
+export_dossier
+
 email
+
+(backtest_runner)
 
 (optional) backtest, fred_fetch, finra_fetch
 
@@ -148,20 +155,30 @@ Resolves TRADE_DATE in America/New_York time.
 Runs all jobs with REPORT_DATE pinned to that same date.
 
 Uses consistent feed + adjustment for both daily & hourly pulls.
+Honors ENABLE_HOURLY=0 to skip hourly fetches on full-universe runs.
 
 Typical run:
 
 chmod +x scripts/run_daily.sh
 ./scripts/run_daily.sh
 
+To skip hourly bars for full-universe runs:
+
+ENABLE_HOURLY=0 ./scripts/run_daily.sh
+
+Dossier export (LLM-ready JSONL)
+
+Generate a per-ticker dossier after running report:
+
+docker compose run --rm export_dossier --date 2026-01-16
+
 Important: trade date correctness (holidays)
 
 Your “last completed trading day” must be holiday-aware.
 If your helper function only skips weekends, it will incorrectly treat holidays as trade dates and can lead to failed data pulls (or empty/incomplete data).
 
-Recommended approach:
-
-Implement last_completed_trading_day_et() using Alpaca market calendar (holiday-aware), and only return “today” after market close + a grace window.
+Current status:
+- last_completed_trading_day_et() is implemented using the Alpaca market calendar when available (holiday-aware), with a weekend-only fallback, and a cutoff hour buffer.
 
 Universe snapshots
 What is universe_daily?
@@ -287,7 +304,7 @@ Compute rank features (trend/liquidity/risk, etc.)
 
 Output action_list.csv, watch_list.csv, summary.txt
 
-Coverage gating (recommended)
+Coverage gating (implemented)
 
 Example policy:
 
@@ -298,6 +315,10 @@ Require ≥ N bars of history for the strategy’s indicators (e.g., at least 60
 For hourly features, require ≥ N hourly bars for the day (e.g., ≥ 4)
 
 This prevents false rankings on symbols with insufficient or missing data.
+
+Current status:
+- Coverage gating is enforced in report (daily bars required; hourly currently optional).
+- Rank scores are persisted to rank_scores_daily for reuse by orders/backtest/LLM workflows.
 
 Backfilling
 
@@ -320,6 +341,92 @@ docker compose run --rm eod_fetch \
   --mode range --start 2024-01-01 --end 2026-01-16 \
   --feed sip --adjustment raw
 
+Yahoo Finance backfill (for backtesting)
+
+If you want to backtest without Alpaca universe data, you can backfill daily bars from Yahoo:
+
+docker compose run --rm yahoo_fetch \
+  --start 2024-01-01 --end 2024-12-31 \
+  --tickers-path /app/tickers.txt --limit 200
+
+Backtest runner (deterministic replay)
+
+The backtest runner replays daily signals -> report -> orders, then simulates fills at close:
+
+docker compose run --rm backtest_runner \
+  --start 2024-01-01 --end 2024-12-31 \
+  --book combined --reset-book \
+  --tickers-source prices
+
+For strict no-lookahead signals (use data up to prior trading day), add:
+
+  --no-lookahead
+
+To keep universe snapshots aligned with each trade date, fetch universe_daily
+for every trading day in your range (slower but most correct). One option:
+
+  sqlite3 data/app.db \
+    "SELECT DISTINCT date FROM prices_daily WHERE source='alpaca' AND date BETWEEN '2024-01-01' AND '2024-12-31' ORDER BY date;" \
+  | while read -r d; do
+      docker compose run --rm universe_fetch --date "$d" --replace
+    done
+
+Alternatively, use the helper script to backfill from prices_daily:
+
+  ./scripts/backfill_universe_from_prices.sh 2024-01-01 2024-12-31 alpaca
+
+If you need to run the helper inside a container, mount the repo and override the fetch command and entrypoint:
+
+  docker compose run --rm --entrypoint bash \
+    -v "$PWD":/workspace -w /workspace \
+    backtest_runner -lc \
+    "DB_PATH=/app/data/app.db UNIVERSE_FETCH_CMD='python -m src.jobs.universe_fetch' ./scripts/backfill_universe_from_prices.sh 2024-01-01 2024-12-31 alpaca"
+
+To limit the scan to more liquid names, pass liquidity filters down to signals:
+
+  --min-avg-volume 2000000
+  --min-adv20-dollars 20000000
+
+Outputs:
+
+outputs/backtests/<run_id>/
+  backtest_equity.csv
+  backtest_summary.csv
+  backtest_trades.csv
+
+Stage 1: Edge report (signal quality)
+
+Generate forward-return diagnostics by score decile, MAE/MFE, regime splits,
+and calibration curves:
+
+docker compose run --rm stage1_edge_report \
+  --start 2024-01-01 --end 2024-12-31 \
+  --horizons 5,10,20
+
+Outputs:
+
+outputs/stage1_edge/<run_id>/
+  signals_with_forwards.csv
+  decile_report_5d.csv
+  regime_report_5d.csv
+  calibration_5d.csv
+
+Stage 2: Portfolio simulator (cash + slots)
+
+Simulate realizable returns with cash/slot constraints and a deterministic
+selection policy (rank_score, then liquidity):
+
+docker compose run --rm portfolio_sim \
+  --start 2024-01-01 --end 2024-12-31 \
+  --max-positions 20 --min-ticket-pct 0.05 \
+  --hold-days 5 --entry-exec close --exit-exec close
+
+Outputs:
+
+outputs/stage2_portfolio/<run_id>/
+  equity_curve.csv
+  trades.csv
+
 
 If you plan to “always backfill when data is not enough,” implement a simple check:
 
@@ -329,37 +436,47 @@ Roadmap (next milestones)
 
 Stabilize trade date + canonical data config
 
-Holiday-aware trade date function
+Holiday-aware trade date function (implemented with Alpaca calendar + fallback)
 
 Consistent feed/adjustment across daily/hourly
 
 Ranking feature engineering (report-side first)
 
-Coverage gating
+Coverage gating (implemented; hourly optional)
 
-Strategy-specific rank columns (trend/liquidity/risk)
+Strategy-specific rank columns (trend/liquidity/risk) (implemented for ma_cross + retest_shrink)
 
 Output top-N per strategy and combined
 
 Strategy meta improvements (without changing logic)
 
-Keep D0/retest/confirm logic fixed
+Keep D0/retest/confirm logic fixed (implemented)
 
-Expand meta and scoring only
+Expand meta and scoring only (implemented for ma_cross + retest_shrink)
 
-Ensure adapter normalization remains stable
+Ensure adapter normalization remains stable (implemented)
 
 Hourly-informed ranking
 
-Add intraday features for MA strategies
+Add intraday features for MA strategies (implemented in report + ma_cross)
 
-Improve scoring/ranking for MA cross + retest shrink
+Improve scoring/ranking for MA cross + retest shrink (implemented, ongoing tuning)
 
 LLM-ready datasets
 
 Build a compact “ticker dossier” payload (signals + rank features + key windows)
 
 Store in DB or export JSON for RAG later
+
+Current status:
+- export_dossier job writes a per-ticker JSONL dossier to outputs/<REPORT_DATE>/dossier.jsonl by combining signals, rank scores, daily features, hourly coverage, and the daily OHLCV snapshot.
+Schema (per line):
+- date, ticker
+- signals: list of {strategy, state, score, stop, raw_state, features, meta}
+- rank_scores: list of {strategy, rank_score, meta}
+- daily_features: output of build_daily_features (close, ma5/10/20/50/200, atr14, atr_pct, dollar_vol_20, daily_bars_60)
+- hourly_coverage: {hourly_bars}
+- daily_snapshot: {open, high, low, close, volume}
 
 Scaling for full-market scans
 

@@ -38,6 +38,12 @@ services:
     volumes: *vol_with_tickers
     entrypoint: ["python", "-m", "src.jobs.hourly_fetch"]
 
+  yahoo_fetch:
+    build: .
+    env_file: .env
+    volumes: *vol_with_tickers
+    entrypoint: ["python", "-m", "src.jobs.yahoo_fetch"]
+
   generate_signals:
     build: .
     env_file: .env
@@ -61,6 +67,12 @@ services:
     volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.report"]
 
+  export_dossier:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.export_dossier"]
+
   email:
     build: .
     env_file: .env
@@ -72,6 +84,24 @@ services:
     env_file: .env
     volumes: *vol_report
     entrypoint: ["python", "-m", "src.jobs.backtest"]
+
+  backtest_runner:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.backtest_runner"]
+
+  stage1_edge_report:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.stage1_edge_report"]
+
+  portfolio_sim:
+    build: .
+    env_file: .env
+    volumes: *vol_report
+    entrypoint: ["python", "-m", "src.jobs.portfolio_sim"]
 
   fred_fetch:
     build: .

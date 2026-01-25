@@ -8,7 +8,7 @@ import concurrent.futures
 from typing import Any, Dict, List, Tuple
 from pathlib import Path
 
-from src.common.db import init_db, connect
+from src.common.db import init_db, connect, get_prices_daily_source
 from src.common.logging import setup_logger
 
 # Import your existing logic
@@ -165,7 +165,7 @@ def run_strategy_instance(
         if eq.empty:
             return {**tuning_params, "sharpe": 0.0, "cagr": 0.0, "trades": 0}
             
-        metrics = summarize(eq, bench_cols=[]) # Skip benchmarks for speed in tuning
+        metrics = summarize(eq, bench_cols=[], trades=trades) # Skip benchmarks for speed in tuning
         
         return {
             **tuning_params,
@@ -197,10 +197,12 @@ def main():
     
     # 1. Load Data ONCE
     log.info("Loading price data...")
+    price_source = get_prices_daily_source()
     with connect() as conn:
         df = pd.read_sql_query(
-            "SELECT ticker, date, open, high, low, close, volume FROM prices_daily", 
-            conn
+            "SELECT ticker, date, open, high, low, close, volume FROM prices_daily WHERE source=?",
+            conn,
+            params=(price_source,),
         )
     df["date"] = pd.to_datetime(df["date"])
     df = df[(df["date"] >= pd.to_datetime(args.start)) & (df["date"] <= pd.to_datetime(args.end))].copy()
