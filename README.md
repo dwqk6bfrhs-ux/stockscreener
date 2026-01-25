@@ -375,10 +375,12 @@ Alternatively, use the helper script to backfill from prices_daily:
 
   ./scripts/backfill_universe_from_prices.sh 2024-01-01 2024-12-31 alpaca
 
-If you need to run the helper inside a container, override the fetch command and entrypoint:
+If you need to run the helper inside a container, mount the repo and override the fetch command and entrypoint:
 
-  docker compose run --rm --entrypoint bash backtest_runner -lc \
-    "UNIVERSE_FETCH_CMD='python -m src.jobs.universe_fetch' ./scripts/backfill_universe_from_prices.sh 2024-01-01 2024-12-31 alpaca"
+  docker compose run --rm --entrypoint bash \
+    -v "$PWD":/workspace -w /workspace \
+    backtest_runner -lc \
+    "DB_PATH=/app/data/app.db UNIVERSE_FETCH_CMD='python -m src.jobs.universe_fetch' ./scripts/backfill_universe_from_prices.sh 2024-01-01 2024-12-31 alpaca"
 
 To limit the scan to more liquid names, pass liquidity filters down to signals:
 

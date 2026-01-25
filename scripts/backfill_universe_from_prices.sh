@@ -16,10 +16,32 @@ shift 3 || shift 2
 db_path="${DB_PATH:-data/app.db}"
 fetch_cmd="${UNIVERSE_FETCH_CMD:-docker compose run --rm universe_fetch}"
 
-sqlite3 "$db_path" \
-  "SELECT DISTINCT date FROM prices_daily WHERE source='${source}' AND date BETWEEN '${start_date}' AND '${end_date}' ORDER BY date;" \
-| while read -r d; do
-    if [[ -n "$d" ]]; then
-      ${fetch_cmd} --date "$d" --replace "$@"
-    fi
-  done
+python - <<PY | while read -r d; do
+import sqlite3
+
+db_path = ${db_path@Q}
+source = ${source@Q}
+start_date = ${start_date@Q}
+end_date = ${end_date@Q}
+
+conn = sqlite3.connect(db_path)
+try:
+    rows = conn.execute(
+        \"\"\"
+        SELECT DISTINCT date
+        FROM prices_daily
+        WHERE source = ?
+          AND date BETWEEN ? AND ?
+        ORDER BY date
+        \"\"\",
+        (source, start_date, end_date),
+    ).fetchall()
+    for (date_str,) in rows:
+        print(date_str)
+finally:
+    conn.close()
+PY
+  if [[ -n "$d" ]]; then
+    ${fetch_cmd} --date "$d" --replace "$@"
+  fi
+done
