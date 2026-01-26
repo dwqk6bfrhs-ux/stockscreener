@@ -172,6 +172,39 @@ Generate a per-ticker dossier after running report:
 
 docker compose run --rm export_dossier --date 2026-01-16
 
+ML feature export (v_ml_features_daily)
+
+Create a daily ML feature view and export it to CSV or parquet:
+
+docker compose run --rm backtest_runner \
+  python -m src.jobs.export_ml_features --start 2026-01-01 --end 2026-01-31 --format both
+
+You can also call the wrapper script locally:
+
+./scripts/export_ml_features.sh --date 2026-01-16 --format csv
+
+Options:
+- --label-threshold sets the next-day label hurdle (default 0.03).
+- --skip-view avoids recreating the SQLite view if you already created it.
+- --output lets you control the export path (with or without extension).
+
+Sanity-check queries
+
+Check row counts by date (universe filtered):
+
+sqlite3 data/app.db \\
+  \"SELECT date, COUNT(*) AS rows FROM v_ml_features_daily GROUP BY date ORDER BY date DESC LIMIT 5;\"
+
+Verify missing feature coverage:
+
+sqlite3 data/app.db \\
+  \"SELECT COUNT(*) AS total, SUM(ret_5d IS NULL) AS missing_ret_5d, SUM(adv20_dollars IS NULL) AS missing_adv20 FROM v_ml_features_daily;\"
+
+Quick label prevalence:
+
+sqlite3 data/app.db \\
+  \"SELECT AVG(label_high_up_x) AS label_high_rate, AVG(label_close_up_x) AS label_close_rate FROM v_ml_features_daily;\"
+
 Important: trade date correctness (holidays)
 
 Your “last completed trading day” must be holiday-aware.
