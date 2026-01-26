@@ -27,13 +27,13 @@ end_date = ${end_date@Q}
 conn = sqlite3.connect(db_path)
 try:
     rows = conn.execute(
-        \"\"\"
+        """
         SELECT DISTINCT date
         FROM prices_daily
         WHERE source = ?
           AND date BETWEEN ? AND ?
         ORDER BY date
-        \"\"\",
+        """,
         (source, start_date, end_date),
     ).fetchall()
     for (date_str,) in rows:
